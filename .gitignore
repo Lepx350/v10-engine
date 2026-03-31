@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.pyo
+workspace/
+storyboard_config.json
