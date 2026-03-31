@@ -94,7 +94,8 @@ body{font-family:'Outfit',system-ui,sans-serif;background:var(--bg);color:var(--
 .badge{font-family:'Geist Mono',monospace;font-size:9px;padding:2px 6px;border-radius:4px}
 .badge-noir{background:rgba(52,211,153,.1);color:var(--m)}
 .badge-fern{background:var(--vbg);color:var(--v)}
-.panel-vo{font-size:12px;color:var(--t2);line-height:1.5;margin:4px 0}
+.panel-vo{font-size:12px;color:var(--t2);line-height:1.5;margin:4px 0;max-height:3em;overflow:hidden;transition:max-height .3s}
+.panel-vo.expanded{max-height:none}
 .panel-meta{font-family:'Geist Mono',monospace;font-size:9px;color:var(--t3);margin-top:4px}
 .panel-actions{display:flex;gap:6px;margin-top:8px}
 .p-btn{flex:1;padding:8px;border-radius:8px;border:none;font-family:'Outfit',sans-serif;font-size:12px;font-weight:600;cursor:pointer;transition:.15s;text-align:center}
@@ -198,6 +199,11 @@ body{font-family:'Outfit',system-ui,sans-serif;background:var(--bg);color:var(--
       <div class="tab" data-tab="batch" onclick="switchTab('batch')">Batch</div>
       <div class="tab" data-tab="log" onclick="switchTab('log')">Log</div>
     </div>
+    <!-- Global progress bar — visible on all tabs during generation -->
+    <div class="prog" id="globalProg" style="margin:0">
+      <div class="prog-bar"><div class="prog-fill" id="progFill"></div></div>
+      <div class="prog-text" id="progText"></div>
+    </div>
   </div>
 
   <!-- TAB: SHOTS (main view) -->
@@ -205,6 +211,7 @@ body{font-family:'Outfit',system-ui,sans-serif;background:var(--bg);color:var(--
     <div class="batch-row" style="margin-top:12px">
       <button class="batch-btn secondary" onclick="genNextUndone()">▶ Next Undone</button>
       <button class="batch-btn secondary" onclick="genAllSection()">Generate Section ▼</button>
+      <button class="batch-btn stop hidden" onclick="stopRun()" id="shotsStop">■ Stop</button>
     </div>
     <div id="panelList" style="margin-top:12px"></div>
   </div>
@@ -245,7 +252,6 @@ body{font-family:'Outfit',system-ui,sans-serif;background:var(--bg);color:var(--
       <button class="batch-btn stop hidden" onclick="stopRun()" id="batchStop">■ Stop</button>
       <button class="batch-btn secondary" onclick="run('export')">↗ Export</button>
     </div>
-    <div class="prog"><div class="prog-bar"><div class="prog-fill" id="progFill"></div></div><div class="prog-text" id="progText"></div></div>
   </div>
 
   <!-- TAB: LOG -->
@@ -344,7 +350,7 @@ function renderPanels(){
           <span class="badge ${badge}">${p.type}</span>
           ${p.chars.length?`<span style="font-family:'Geist Mono',monospace;font-size:9px;color:var(--t3)">@${p.chars[0]}</span>`:''}
         </div>
-        ${p.vo?`<div class="panel-vo">"${p.vo}${p.vo.length>=120?'…':''}"</div>`:''}
+        ${p.vo?`<div class="panel-vo" onclick="this.classList.toggle('expanded')" style="cursor:pointer">"${p.vo}"</div>`:''}
         <div class="panel-actions">
           <button class="p-btn ${done?'redo':'gen'}" id="btn-${p.id}" onclick="genOne('${p.id}')">${done?'Redo':'Generate'}</button>
         </div>
@@ -474,7 +480,10 @@ function renderStyleAnchor(exists){
     g.innerHTML=`<div class="gal-item" style="aspect-ratio:16/9;grid-column:span 2;position:relative">
       <img src="/api/ref/style_anchor/style_key" loading="lazy" onclick="openPv('/api/ref/style_anchor/style_key','Style Anchor')">
       <div class="gl">Style Key — L9</div>
-      <button onclick="event.stopPropagation();redoRef('style_anchor','style_key')" style="position:absolute;top:4px;right:4px;background:var(--rbg);border:1px solid rgba(248,113,113,.2);color:var(--r);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">↻</button>
+      <div style="position:absolute;top:4px;right:4px;display:flex;gap:3px">
+        <button onclick="event.stopPropagation();redoRef('style_anchor','style_key')" style="background:var(--rbg);border:1px solid rgba(248,113,113,.2);color:var(--r);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">↻</button>
+        <button onclick="event.stopPropagation();editRef('style_anchor','style_key')" style="background:var(--vbg);border:1px solid rgba(167,139,250,.2);color:var(--v);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">✏</button>
+      </div>
     </div>`;
   } else {
     s.textContent='—';s.style.color='var(--t3)';
@@ -489,7 +498,10 @@ function renderCharGallery(chars){
     if(c.done) return `<div class="gal-item" style="aspect-ratio:16/9;position:relative">
       <img src="/api/ref/char/${c.id}" loading="lazy" onclick="openPv('/api/ref/char/${c.id}','@${c.id} — ${c.name}')">
       <div class="gl">@${c.id}</div>
-      <button onclick="event.stopPropagation();redoRef('char','${c.id}')" style="position:absolute;top:4px;right:4px;background:var(--rbg);border:1px solid rgba(248,113,113,.2);color:var(--r);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">↻</button>
+      <div style="position:absolute;top:4px;right:4px;display:flex;gap:3px">
+        <button onclick="event.stopPropagation();redoRef('char','${c.id}')" style="background:var(--rbg);border:1px solid rgba(248,113,113,.2);color:var(--r);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">↻</button>
+        <button onclick="event.stopPropagation();editRef('char','${c.id}')" style="background:var(--vbg);border:1px solid rgba(167,139,250,.2);color:var(--v);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">✏</button>
+      </div>
     </div>`;
     return `<div class="gal-item empty" style="aspect-ratio:16/9">@${c.id}</div>`;
   }).join('');
@@ -502,12 +514,18 @@ function renderEnvGallery(envs){
     let h=e.env?`<div class="gal-item" style="position:relative">
       <img src="/api/ref/env/${e.id}" loading="lazy" onclick="openPv('/api/ref/env/${e.id}','${e.name}')">
       <div class="gl">${e.name}</div>
-      <button onclick="event.stopPropagation();redoRef('env','${e.id}')" style="position:absolute;top:4px;right:4px;background:var(--rbg);border:1px solid rgba(248,113,113,.2);color:var(--r);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">↻</button>
+      <div style="position:absolute;top:4px;right:4px;display:flex;gap:3px">
+        <button onclick="event.stopPropagation();redoRef('env','${e.id}')" style="background:var(--rbg);border:1px solid rgba(248,113,113,.2);color:var(--r);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">↻</button>
+        <button onclick="event.stopPropagation();editRef('env','${e.id}')" style="background:var(--vbg);border:1px solid rgba(167,139,250,.2);color:var(--v);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">✏</button>
+      </div>
     </div>`:`<div class="gal-item empty">${e.name}</div>`;
     h+=e.master?`<div class="gal-item" style="position:relative">
       <img src="/api/ref/master/${e.id}" loading="lazy" onclick="openPv('/api/ref/master/${e.id}','${e.name} ★')">
       <div class="gl">${e.name} ★</div>
-      <button onclick="event.stopPropagation();redoRef('master','${e.id}')" style="position:absolute;top:4px;right:4px;background:var(--rbg);border:1px solid rgba(248,113,113,.2);color:var(--r);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">↻</button>
+      <div style="position:absolute;top:4px;right:4px;display:flex;gap:3px">
+        <button onclick="event.stopPropagation();redoRef('master','${e.id}')" style="background:var(--rbg);border:1px solid rgba(248,113,113,.2);color:var(--r);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">↻</button>
+        <button onclick="event.stopPropagation();editRef('master','${e.id}')" style="background:var(--vbg);border:1px solid rgba(167,139,250,.2);color:var(--v);border-radius:6px;padding:2px 6px;font-size:8px;font-family:'Geist Mono',monospace;cursor:pointer">✏</button>
+      </div>
     </div>`:`<div class="gal-item empty">${e.name} ★</div>`;
     return h;
   }).join('');
@@ -522,6 +540,27 @@ async function redoRef(type,id){
     const res=await fetch('/api/redo_ref',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({ref_type:type,ref_id:id,api_key:key})
+    });
+    const data=await res.json();
+    if(data.error){toast(data.error,'error')}
+    else{toast(`${type}/${id} done ✓`);loadRefs()}
+  }catch(e){toast(`Error: ${e.message}`,'error')}
+}
+
+// Edit ref with custom prompt (style auto-injected by engine)
+function editRef(type,id){
+  const prompt=window.prompt(`Custom prompt for ${type}/${id}:\n(Style rules auto-applied — just describe what you want)`);
+  if(!prompt)return;
+  doEditRef(type,id,prompt);
+}
+async function doEditRef(type,id,customPrompt){
+  const key=$('apiKey').value;
+  if(!key){toast('Enter API key','error');return}
+  toast(`Editing ${type}/${id}...`);
+  try{
+    const res=await fetch('/api/edit_ref',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ref_type:type,ref_id:id,api_key:key,custom_prompt:customPrompt})
     });
     const data=await res.json();
     if(data.error){toast(data.error,'error')}
@@ -546,12 +585,14 @@ async function run(step,section){
   if(data.error){toast(data.error,'error');return}
   isRunning=true;currentRunStep=step;setRunning(true);
   toast(`Running: ${step.replace(/_/g,' ')}`);
-  switchTab('log');startSSE();
+  startSSE();
 }
 async function stopRun(){await fetch('/api/stop',{method:'POST'});toast('Stopping...')}
 function setRunning(v){
   isRunning=v;$('dot').classList.toggle('on',v);$('statusText').textContent=v?'Generating':'Ready';
-  $('batchStop').classList.toggle('hidden',!v);$('progFill').classList.toggle('on',v);
+  $('batchStop').classList.toggle('hidden',!v);
+  $('shotsStop').classList.toggle('hidden',!v);
+  $('progFill').classList.toggle('on',v);
 }
 
 // SSE
@@ -561,7 +602,14 @@ function startSSE(){
   evtSource=new EventSource('/api/stream');
   evtSource.onmessage=e=>{
     sseRetries=0;const d=JSON.parse(e.data);
-    if(d.type==='log')addLog(d.msg,d.tag);
+    if(d.type==='log'){
+      addLog(d.msg,d.tag);
+      // Live update: when a panel completes, update its card immediately
+      if(d.tag==='ok' && d.msg.startsWith('OK →')){
+        const pid=d.msg.replace('OK → ','').trim();
+        liveUpdatePanel(pid);
+      }
+    }
     if(d.type==='progress'){
       const pct=d.total?(d.done/d.total*100):0;
       $('progFill').style.width=pct+'%';
@@ -578,6 +626,26 @@ function startSSE(){
     evtSource.close();
     if(isRunning&&sseRetries<10){sseRetries++;setTimeout(startSSE,2000)}
   };
+}
+
+function liveUpdatePanel(pid){
+  const card=$('panel-'+pid);
+  if(card){
+    const imgDiv=card.querySelector('.panel-img');
+    if(imgDiv){
+      imgDiv.innerHTML=`<img src="/api/preview/${pid}?t=${Date.now()}" loading="lazy">`;
+      imgDiv.onclick=()=>openPv(`/api/preview/${pid}?t=${Date.now()}`,pid);
+    }
+    card.classList.add('done');
+    const btn=$('btn-'+pid);
+    if(btn){btn.className='p-btn redo';btn.textContent='Redo'}
+    // Update count
+    const done=document.querySelectorAll('.panel.done').length;
+    $('shotsCnt').textContent=`${done}/${allPanels.length}`;
+    // Mark panel done in allPanels array
+    const p=allPanels.find(x=>x.id===pid);
+    if(p)p.done=true;
+  }
 }
 
 function addLog(msg,tag){
