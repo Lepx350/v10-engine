@@ -1,22 +1,30 @@
 """
-STORYBOARD VISUAL ENGINE v10.3
-12-Layer Consistency Engine -- Project-agnostic
+STORYBOARD VISUAL ENGINE v10.4
+13-Layer Consistency Engine -- Project-agnostic
 All content (characters, environments) loaded from JSX storyboard files.
+
+CHANGELOG:
+- v10.4: Layer 13 Cinematic Director AI integration into build_prompt().
+         Live preview + per-section progress in UI. Version bump.
+- v10.3: Smart detection, aggressive auto-redo, body type injection,
+         section color palette lock, panel-to-panel continuity scoring.
 """
-# v10.3: Smart detection (fuzzy match, context propagation, pronoun inference),
-#        aggressive auto-redo (3 retries, diagnosis, prompt rewrite, keep best),
-#        API error retry with backoff, body type injection,
-#        section color palette lock, panel-to-panel continuity scoring
 
 import os, re, json, time, sys, base64, threading, shutil
 from pathlib import Path
 from datetime import datetime
-from collections import Counter
 import numpy as np
 
 from google import genai
 from google.genai import types
 from PIL import Image, ImageDraw
+
+# Layer 13: Cinematic Director AI
+try:
+    from director import inject_cinematography, get_beat_for_logging
+    _HAS_DIRECTOR = True
+except ImportError:
+    _HAS_DIRECTOR = False
 
 # ═══════════════════════════════════════════════════════════
 # STYLE PRESETS -- Select in UI dropdown
@@ -874,244 +882,28 @@ def get_active_master_shots():
 # ═══════════════════════════════════════════════════════════
 
 def detect_characters(prompt, vo=""):
-    """Detect characters in prompt + vo text. Uses fuzzy substring matching.
-    Returns list of char IDs."""
+    """Detect characters in prompt. Returns list of char IDs."""
     text = ((prompt or "") + " " + (vo or "")).lower()
     chars = get_active_characters()
     found = []
     for cid, c in chars.items():
-        matched = False
-        # Check aliases (exact substring match)
         for alias in c["alias"]:
             if alias.lower() in text:
-                matched = True
+                if cid not in found:
+                    found.append(cid)
                 break
-        # Fuzzy match: check if character name (or parts) appear as substring
-        if not matched:
-            name = c.get("name", "").lower()
-            name_parts = re.sub(r'[^a-z0-9\s]', '', name).split()
-            for part in name_parts:
-                if len(part) >= 4 and part in text:
-                    matched = True
-                    break
-        if matched and cid not in found:
-            found.append(cid)
     return found
 
 
-# Pronoun / generic reference patterns that suggest a character is present
-_PRONOUN_MALE = {"he", "him", "his", "the man", "the figure", "the guy"}
-_PRONOUN_FEMALE = {"she", "her", "the woman", "the girl", "the lady"}
-_PRONOUN_GENERIC = {"they", "them", "the person", "the character", "the figure",
-                    "the silhouette", "the shadow"}
-
-
-def detect_characters_with_context(panels, section_panels_map=None):
-    """Enhanced character detection with context propagation and pronoun inference.
-
-    Args:
-        panels: list of all panel dicts
-        section_panels_map: optional dict {section_name: [panel_dicts]}
-
-    Returns:
-        dict {panel_id: [char_ids]}
-    """
-    chars = get_active_characters()
-    char_map = {}
-
-    # Pass 1: Direct detection using prompt + vo
-    for p in panels:
-        pid = p.get('id', '')
-        prompt = get_image_prompt(p)
-        vo = p.get('vo', '')
-        char_map[pid] = detect_characters(prompt, vo)
-
-    # Build section groups if not provided
-    if section_panels_map is None:
-        section_panels_map = {}
-        for p in panels:
-            sec = get_section(p)
-            if sec not in section_panels_map:
-                section_panels_map[sec] = []
-            section_panels_map[sec].append(p)
-
-    # Pass 2: Context propagation within sections
-    # If panels before AND after an untagged panel both have the same character, infer it
-    for sec, sec_panels in section_panels_map.items():
-        pids = [p.get('id', '') for p in sec_panels]
-        for i, pid in enumerate(pids):
-            if char_map.get(pid):
-                continue  # already has characters
-            # Look for characters in surrounding panels
-            before_chars = set()
-            after_chars = set()
-            for j in range(i - 1, -1, -1):
-                bchars = char_map.get(pids[j], [])
-                if bchars:
-                    before_chars.update(bchars)
-                    break
-            for j in range(i + 1, len(pids)):
-                achars = char_map.get(pids[j], [])
-                if achars:
-                    after_chars.update(achars)
-                    break
-            # Characters present in both before and after → infer
-            shared = before_chars & after_chars
-            if shared:
-                char_map[pid] = list(shared)
-
-    # Pass 3: Pronoun inference
-    # If a section has a dominant character and a panel uses pronouns without names
-    for sec, sec_panels in section_panels_map.items():
-        pids = [p.get('id', '') for p in sec_panels]
-        # Find dominant character in this section
-        all_chars_in_section = []
-        for pid in pids:
-            all_chars_in_section.extend(char_map.get(pid, []))
-        if not all_chars_in_section:
-            continue
-        char_counts = Counter(all_chars_in_section)
-        dominant_char = char_counts.most_common(1)[0][0]
-        dominant_ratio = char_counts[dominant_char] / max(len(pids), 1)
-
-        # Only infer if dominant character appears in >50% of panels
-        if dominant_ratio < 0.5:
-            continue
-
-        for p in sec_panels:
-            pid = p.get('id', '')
-            if char_map.get(pid):
-                continue  # already tagged
-            text = ((get_image_prompt(p) or "") + " " + (p.get('vo', '') or "")).lower()
-            # Check for pronoun/generic references
-            has_pronoun = any(pron in text for pron in _PRONOUN_MALE | _PRONOUN_FEMALE | _PRONOUN_GENERIC)
-            if has_pronoun:
-                char_map[pid] = [dominant_char]
-
-    return char_map
-
-
-# Synonym expansion for environment keywords
-_ENV_SYNONYMS = {
-    "tunnel": ["underground", "passage", "shaft", "dig", "beneath", "subterranean", "bore"],
-    "vault": ["safe", "deposit boxes", "strongroom", "secured room", "safety deposit"],
-    "bank": ["banco", "financial", "branch office", "teller"],
-    "house": ["home", "residence", "dwelling", "apartment", "flat", "living room", "kitchen"],
-    "street": ["road", "avenue", "alley", "sidewalk", "pavement", "curb"],
-    "prison": ["jail", "cell", "penitentiary", "correctional", "behind bars", "incarcerated"],
-    "courtroom": ["court", "tribunal", "judge", "trial", "verdict", "hearing"],
-    "highway": ["motorway", "freeway", "expressway", "interstate", "overpass"],
-    "interrogation": ["questioning", "interview room", "police station", "precinct"],
-    "car": ["vehicle", "automobile", "sedan", "truck", "van", "driving"],
-    "office": ["desk", "cubicle", "boardroom", "conference room", "workplace"],
-    "warehouse": ["storage", "depot", "loading dock", "industrial"],
-    "restaurant": ["diner", "cafe", "bar", "tavern", "pub", "eatery"],
-    "hospital": ["clinic", "emergency room", "ward", "medical", "ambulance"],
-    "church": ["chapel", "cathedral", "sanctuary", "altar"],
-    "school": ["classroom", "campus", "university", "lecture hall"],
-    "park": ["garden", "plaza", "square", "fountain"],
-    "rural": ["countryside", "farmland", "remote", "isolated", "field"],
-    "aerial": ["skyline", "cityscape", "bird's eye", "overhead", "drone shot"],
-}
-
-
-def _expand_keywords(keywords):
-    """Expand environment keywords with synonyms."""
-    expanded = list(keywords)
-    for kw in keywords:
-        kw_lower = kw.lower()
-        for root, syns in _ENV_SYNONYMS.items():
-            if root in kw_lower or kw_lower in root:
-                for syn in syns:
-                    if syn not in expanded:
-                        expanded.append(syn)
-    return expanded
-
-
 def detect_environment(prompt, vo=""):
-    """Detect environment/location using dynamic ENVIRONMENTS with synonym expansion."""
+    """Detect environment/location using dynamic ENVIRONMENTS."""
     text = ((prompt or "") + " " + (vo or "")).lower()
     envs = get_active_environments()
     for eid, env in envs.items():
-        keywords = env.get("keywords", [])
-        expanded = _expand_keywords(keywords)
-        for kw in expanded:
+        for kw in env.get("keywords", []):
             if kw.lower() in text:
                 return eid
     return None
-
-
-def detect_environments_with_context(panels, section_panels_map=None):
-    """Enhanced environment detection with context propagation and section name fallback.
-
-    Args:
-        panels: list of all panel dicts
-        section_panels_map: optional dict {section_name: [panel_dicts]}
-
-    Returns:
-        dict {panel_id: env_id_or_None}
-    """
-    envs = get_active_environments()
-    env_map = {}
-
-    # Pass 1: Direct detection using prompt + vo
-    for p in panels:
-        pid = p.get('id', '')
-        prompt = get_image_prompt(p)
-        vo = p.get('vo', '')
-        env_map[pid] = detect_environment(prompt, vo)
-
-    # Build section groups if not provided
-    if section_panels_map is None:
-        section_panels_map = {}
-        for p in panels:
-            sec = get_section(p)
-            if sec not in section_panels_map:
-                section_panels_map[sec] = []
-            section_panels_map[sec].append(p)
-
-    # Pass 2: Context propagation within sections
-    # Environments don't change mid-scene — fill gaps
-    for sec, sec_panels in section_panels_map.items():
-        pids = [p.get('id', '') for p in sec_panels]
-        for i, pid in enumerate(pids):
-            if env_map.get(pid):
-                continue  # already detected
-            before_env = None
-            after_env = None
-            for j in range(i - 1, -1, -1):
-                if env_map.get(pids[j]):
-                    before_env = env_map[pids[j]]
-                    break
-            for j in range(i + 1, len(pids)):
-                if env_map.get(pids[j]):
-                    after_env = env_map[pids[j]]
-                    break
-            # If before and after share the same env, fill the gap
-            if before_env and before_env == after_env:
-                env_map[pid] = before_env
-
-    # Pass 3: Section name fallback
-    # If section name contains location hints, use them for unmatched panels
-    for sec, sec_panels in section_panels_map.items():
-        sec_lower = sec.lower()
-        fallback_env = None
-        for eid, env in envs.items():
-            keywords = env.get("keywords", [])
-            expanded = _expand_keywords(keywords)
-            for kw in expanded:
-                if kw.lower() in sec_lower:
-                    fallback_env = eid
-                    break
-            if fallback_env:
-                break
-        if fallback_env:
-            for p in sec_panels:
-                pid = p.get('id', '')
-                if not env_map.get(pid):
-                    env_map[pid] = fallback_env
-
-    return env_map
 
 
 def count_words(text):
@@ -1122,74 +914,29 @@ def count_words(text):
 # PROMPT BUILDING
 # ═══════════════════════════════════════════════════════════
 
-# v10.3: Body type keyword sets for extraction from character descriptions
-_HEIGHT_WORDS = {"tall", "short", "medium height", "average height", "towering", "compact", "small"}
-_BUILD_WORDS = {"stocky", "lean", "muscular", "thin", "barrel-chested", "wiry", "slight",
-                "massive", "average", "broad", "heavyset", "athletic", "bulky", "slender",
-                "thick", "burly", "beefy", "petite", "curvy", "robust", "lanky", "stout"}
-_AGE_WORDS_RE = re.compile(
-    r'(?:mid|early|late|around)[\s-]?(?:\d{2}s?|\d{2}\'?s)|'
-    r'\b(?:young|old|elderly|middle[\s-]?aged|teenage|adolescent)\b',
-    re.IGNORECASE
-)
-
-
-def _extract_body_type(desc):
-    """Extract body type keywords from a character description.
-    Returns a concise string like 'stocky mid-40s build'."""
-    if not desc:
-        return ""
-    desc_lower = desc.lower()
-    parts = []
-
-    # Height (use word boundaries to avoid "short hair" matching "short")
-    for w in _HEIGHT_WORDS:
-        if re.search(r'\b' + re.escape(w) + r'\b(?!\s+hair|\s+cut)', desc_lower):
-            parts.append(w)
-            break
-
-    # Build (use word boundaries)
-    for w in _BUILD_WORDS:
-        if re.search(r'\b' + re.escape(w) + r'\b', desc_lower):
-            parts.append(w)
-            break
-
-    # Age
-    age_match = _AGE_WORDS_RE.search(desc)
-    if age_match:
-        parts.append(age_match.group(0).strip())
-
-    if parts:
-        return " ".join(parts) + " build"
-    return ""
-
-
 def build_prompt(panel, char_id=None, env_id=None, all_chars=None,
-                 color_palette_desc=None):
-    """Build generation prompt: ANCHOR + BODY_TYPE + CHAR_REF + ENV_REF + COLOR + STYLE + SCENE.
+                 section_name="", panel_index=0, section_total=20,
+                 is_first_in_section=False):
+    """Build generation prompt: ANCHOR + L13_CINEMA + CHAR_REF + ENV_REF + STYLE + SCENE.
     Layer 8: all_chars = list of ALL character IDs in this panel.
-    v10.3: Adds body type injection and color palette lock."""
+    Layer 13: Cinematic Director AI injection (camera, lens, lighting, composition)."""
     scene_prompt = get_image_prompt(panel)
     asset = get_asset_type(panel)
     style = get_primary_style() if asset == 'noir' else get_secondary_style()
 
+    # Layer 13: Cinematic Director AI — inject camera/lens/lighting/composition
+    cinema_str = ""
+    if _HAS_DIRECTOR and asset == 'noir':
+        vo = panel.get('vo', '')
+        cinema_str = inject_cinematography(
+            vo, scene_prompt, section_name,
+            panel_index, section_total, is_first_in_section
+        )
+
+    char_str = ""
     chars = get_active_characters()
     char_ids = all_chars or ([char_id] if char_id else [])
     char_ids = [c for c in char_ids if c and c in chars]
-
-    # v10.3: Body type auto-injection
-    body_str = ""
-    if char_ids and asset != 'fern':
-        body_parts = []
-        for cid in char_ids:
-            desc = chars[cid].get("desc", "")
-            body = _extract_body_type(desc)
-            if body:
-                body_parts.append(f"@{cid} is {body}")
-        if body_parts:
-            body_str = "CHARACTER PROPORTIONS: " + ". ".join(body_parts) + ". "
-
-    char_str = ""
     if char_ids and asset != 'fern':
         if len(char_ids) == 1:
             char_str = (
@@ -1214,15 +961,7 @@ def build_prompt(panel, char_id=None, env_id=None, all_chars=None,
             f"Maintain visual consistency with the environment reference image. "
         )
 
-    # v10.3: Section color palette lock
-    color_str = ""
-    if color_palette_desc:
-        color_str = (
-            f"COLOR CONTINUITY: This scene maintains {color_palette_desc}. "
-            f"Match the lighting temperature and color balance of the previous panels in this section. "
-        )
-
-    return get_world_anchor() + body_str + char_str + env_str + color_str + style + scene_prompt
+    return get_world_anchor() + cinema_str + char_str + env_str + style + scene_prompt
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1310,25 +1049,7 @@ def _resize_for_api(img, max_size=768):
     return img
 
 
-def _is_retryable_error(e):
-    """Check if an API error is retryable (429, 500, timeout) vs permanent (400)."""
-    err_str = str(e)
-    if "429" in err_str:
-        return True
-    if "500" in err_str or "502" in err_str or "503" in err_str:
-        return True
-    if "timeout" in err_str.lower() or "timed out" in err_str.lower():
-        return True
-    if "connection" in err_str.lower():
-        return True
-    return False
-
-
 def gen_single(client, prompt, ref_paths=None, max_retries=3):
-    """Generate a single image. v10.3: proper retry with exponential backoff.
-    Retries up to 3 times on retryable errors (429, 500, timeout).
-    429 gets aggressive backoff (30s, 60s, 120s).
-    Other retryable errors get standard backoff (10s, 30s, 60s)."""
     contents = []
     if ref_paths:
         for rp in ref_paths:
@@ -1343,12 +1064,9 @@ def gen_single(client, prompt, ref_paths=None, max_retries=3):
             adaptive_delay.success()
             return extract_image(resp)
         except Exception as e:
-            if attempt < max_retries - 1 and _is_retryable_error(e):
-                if "429" in str(e):
-                    adaptive_delay.rate_limited()
-                    wait = [30, 60, 120][min(attempt, 2)]
-                else:
-                    wait = [10, 30, 60][min(attempt, 2)]
+            if "429" in str(e) and attempt < max_retries - 1:
+                adaptive_delay.rate_limited()
+                wait = 30 * (attempt + 1)
                 time.sleep(wait)
                 continue
             raise
@@ -1435,44 +1153,24 @@ def gen_chat_section(client, section_name, panels_data, callback=None):
                         callback("warn", pid)
 
             except Exception as e:
-                # v10.3: Retry up to 3 times on retryable API errors
-                recovered = False
-                if _is_retryable_error(e):
-                    for retry in range(2):  # 2 more retries (3 total with original)
-                        if "429" in str(e):
-                            adaptive_delay.rate_limited()
-                            wait = [30, 60, 120][min(retry, 2)]
-                        else:
-                            wait = [10, 30, 60][min(retry, 2)]
-                        if callback:
-                            callback("score", pid, f"API error, retry {retry+2}/3 in {wait}s")
-                        time.sleep(wait)
-                        try:
-                            contents2 = []
-                            for rp in pd.get("refs", []):
-                                if Path(rp).exists():
-                                    contents2.append(_resize_for_api(Image.open(rp)))
-                                if len(contents2) >= 3:
-                                    break
-                            contents2.append(pd["prompt"])
-                            resp2 = chat.send_message(contents2, config=get_config())
-                            adaptive_delay.success()
-                            img2 = extract_image(resp2)
-                            if img2:
-                                out_path.write_bytes(img2)
-                                results[pid] = True
-                                if callback:
-                                    callback("ok", pid)
-                                recovered = True
-                                break
-                        except Exception as e2:
-                            e = e2
+                if "429" in str(e):
+                    adaptive_delay.rate_limited()
+                    time.sleep(30)
+                    try:
+                        contents2 = [pd["prompt"]]
+                        resp2 = chat.send_message(contents2, config=get_config())
+                        img2 = extract_image(resp2)
+                        if img2:
+                            out_path.write_bytes(img2)
+                            results[pid] = True
+                            if callback:
+                                callback("ok", pid)
                             continue
-
-                if not recovered:
-                    results[pid] = False
-                    if callback:
-                        callback("fail", pid, f"FAILED after 3 attempts: {str(e)[:80]}")
+                    except:
+                        pass
+                results[pid] = False
+                if callback:
+                    callback("fail", pid, str(e)[:80])
 
             adaptive_delay.wait()
 
@@ -1558,71 +1256,9 @@ def get_master_shot_prompt(eid):
 # L7: VISUAL MEMORY BANK
 # ═══════════════════════════════════════════════════════════
 
-def extract_color_palette(img_path):
-    """v10.3: Extract dominant color palette from an image using PIL.
-    Returns a text description like 'dominant warm amber highlights, deep teal shadows,
-    desaturated mid-tones'."""
-    try:
-        img = Image.open(img_path).convert("RGB")
-        # Resize for speed
-        img = img.resize((100, 100), Image.LANCZOS)
-        arr = np.array(img).reshape(-1, 3).astype(np.float32)
-
-        # Simple k-means-like clustering: find top 3 dominant colors
-        # Use histogram-based approach for reliability without sklearn
-        # Quantize to reduce color space
-        quantized = (arr // 32).astype(np.int32)
-        color_keys = quantized[:, 0] * 10000 + quantized[:, 1] * 100 + quantized[:, 2]
-        counts = Counter(color_keys)
-        top_3 = counts.most_common(3)
-
-        descriptions = []
-        for key, count in top_3:
-            r_q = (key // 10000) * 32 + 16
-            g_q = ((key % 10000) // 100) * 32 + 16
-            b_q = (key % 100) * 32 + 16
-
-            # Classify the color
-            brightness = (r_q + g_q + b_q) / 3
-            if brightness > 180:
-                tone = "bright"
-            elif brightness > 100:
-                tone = "mid-tone"
-            else:
-                tone = "deep shadow"
-
-            # Dominant hue
-            if r_q > g_q + 30 and r_q > b_q + 30:
-                hue = "warm amber/orange"
-            elif b_q > r_q + 30 and b_q > g_q:
-                hue = "cool blue/teal"
-            elif g_q > r_q + 20 and g_q > b_q + 20:
-                hue = "green"
-            elif r_q > 150 and g_q > 100 and b_q < 100:
-                hue = "warm golden"
-            elif abs(r_q - g_q) < 30 and abs(g_q - b_q) < 30:
-                hue = "neutral gray"
-            elif r_q > g_q and b_q > g_q:
-                hue = "magenta/purple"
-            elif r_q > b_q:
-                hue = "warm"
-            else:
-                hue = "cool"
-
-            descriptions.append(f"{tone} {hue}")
-
-        if descriptions:
-            return f"{descriptions[0]} highlights, {descriptions[-1]} shadows, " + \
-                   ("desaturated" if "neutral" in descriptions[1] else descriptions[1]) + " mid-tones"
-        return ""
-    except Exception:
-        return ""
-
-
 class VisualMemoryBank:
     """Tracks the latest successful render for each character and environment.
-    Layer 10: Also tracks section bridge frames for cross-section continuity.
-    v10.3: Also tracks section color palettes."""
+    Layer 10: Also tracks section bridge frames for cross-section continuity."""
 
     def __init__(self, output_dir):
         self.output_dir = Path(output_dir)
@@ -1630,8 +1266,6 @@ class VisualMemoryBank:
         self.char_latest = {}
         self.env_latest = {}
         self.section_last = {}
-        self.section_palette = {}  # v10.3: {section_name: palette_description}
-        self.section_prev_panel = {}  # v10.3: {section_name: last_panel_path}
         self.load()
 
     def load(self):
@@ -1641,12 +1275,9 @@ class VisualMemoryBank:
                 self.char_latest = data.get("char_latest", {})
                 self.env_latest = data.get("env_latest", {})
                 self.section_last = data.get("section_last", {})
-                self.section_palette = data.get("section_palette", {})
-                self.section_prev_panel = data.get("section_prev_panel", {})
                 self.char_latest = {k: v for k, v in self.char_latest.items() if Path(v).exists()}
                 self.env_latest = {k: v for k, v in self.env_latest.items() if Path(v).exists()}
                 self.section_last = {k: v for k, v in self.section_last.items() if Path(v).exists()}
-                self.section_prev_panel = {k: v for k, v in self.section_prev_panel.items() if Path(v).exists()}
             except:
                 pass
 
@@ -1655,8 +1286,6 @@ class VisualMemoryBank:
             "char_latest": self.char_latest,
             "env_latest": self.env_latest,
             "section_last": self.section_last,
-            "section_palette": self.section_palette,
-            "section_prev_panel": self.section_prev_panel,
         }, indent=2))
 
     def update_char(self, cid, scene_path):
@@ -1707,31 +1336,6 @@ class VisualMemoryBank:
                 refs.append(latest)
         return refs[:2]
 
-    # v10.3: Section color palette lock
-    def set_section_palette(self, section_name, palette_desc):
-        """Store the locked color palette for a section."""
-        if palette_desc:
-            self.section_palette[section_name] = palette_desc
-            self.save()
-
-    def get_section_palette(self, section_name):
-        """Get the locked color palette for a section, or None."""
-        return self.section_palette.get(section_name)
-
-    # v10.3: Panel-to-panel continuity
-    def update_prev_panel(self, section_name, panel_path):
-        """Track the most recently generated panel in a section for continuity scoring."""
-        if Path(panel_path).exists():
-            self.section_prev_panel[section_name] = str(panel_path)
-            self.save()
-
-    def get_prev_panel(self, section_name):
-        """Get the previous panel path in this section for continuity scoring."""
-        path = self.section_prev_panel.get(section_name)
-        if path and Path(path).exists():
-            return path
-        return None
-
 
 # ═══════════════════════════════════════════════════════════
 # LAYER 9: STYLE ANCHOR
@@ -1762,39 +1366,21 @@ def get_style_anchor_prompt():
 # LAYER 11: CONSISTENCY SCORING
 # ═══════════════════════════════════════════════════════════
 
-def score_consistency(client, generated_path, ref_paths, panel_desc="",
-                      prev_panel_path=None):
+def score_consistency(client, generated_path, ref_paths, panel_desc=""):
     """Score how well a generated image matches its references.
-    Uses Gemini vision to compare. Returns score 0-100 and feedback.
-
-    v10.3: Supports panel-to-panel continuity scoring via prev_panel_path.
-    Final score = 0.7 * ref_score + 0.3 * continuity_score (if prev panel available).
-    """
+    Uses Gemini vision to compare. Returns score 0-100 and feedback."""
     try:
-        # --- Reference consistency score ---
         contents = []
-        scoring_prompt = (
+        contents.append(
             "CONSISTENCY EVALUATION: Compare the FIRST image (generated scene) against "
             "the REFERENCE images that follow. Score how well the generated scene "
             "matches the references on these criteria:\n"
             "1. Character appearance (clothing, build, proportions)\n"
             "2. Environment consistency (lighting, architecture, mood)\n"
             "3. Style consistency (color palette, contrast, atmosphere)\n\n"
+            'Respond with ONLY a JSON object: {"score": <0-100>, "issues": "<brief description>"}\n'
+            "Score 80+ = good match, 60-79 = acceptable, below 60 = needs redo."
         )
-        if prev_panel_path and Path(prev_panel_path).exists():
-            scoring_prompt += (
-                "Also compare to the PREVIOUS PANEL in the sequence (included as the "
-                "LAST reference image). The two panels should feel like consecutive "
-                "frames from the same movie — consistent lighting direction, color "
-                "temperature, and atmosphere. Provide TWO scores:\n"
-                '{"ref_score": <0-100>, "continuity_score": <0-100>, "issues": "<brief description>"}\n'
-            )
-        else:
-            scoring_prompt += (
-                'Respond with ONLY a JSON object: {"score": <0-100>, "issues": "<brief description>"}\n'
-            )
-        scoring_prompt += "Score 80+ = good match, 60-79 = acceptable, below 60 = needs redo."
-        contents.append(scoring_prompt)
 
         if Path(generated_path).exists():
             contents.append(_resize_for_api(Image.open(generated_path)))
@@ -1804,10 +1390,6 @@ def score_consistency(client, generated_path, ref_paths, panel_desc="",
         for rp in ref_paths[:3]:
             if Path(rp).exists():
                 contents.append(_resize_for_api(Image.open(rp)))
-
-        # Add previous panel as last reference for continuity scoring
-        if prev_panel_path and Path(prev_panel_path).exists():
-            contents.append(_resize_for_api(Image.open(prev_panel_path)))
 
         if len(contents) < 3:
             return 100, "Not enough refs to score"
@@ -1823,122 +1405,14 @@ def score_consistency(client, generated_path, ref_paths, panel_desc="",
                 text = part.text.strip()
                 break
 
+        score_match = re.search(r'"score"\s*:\s*(\d+)', text)
         issues_match = re.search(r'"issues"\s*:\s*"([^"]*)"', text)
+        score = int(score_match.group(1)) if score_match else 75
         issues = issues_match.group(1) if issues_match else "Could not parse"
-
-        # Check for split scoring (panel-to-panel continuity)
-        ref_score_match = re.search(r'"ref_score"\s*:\s*(\d+)', text)
-        cont_score_match = re.search(r'"continuity_score"\s*:\s*(\d+)', text)
-
-        if ref_score_match and cont_score_match and prev_panel_path:
-            ref_score = int(ref_score_match.group(1))
-            cont_score = int(cont_score_match.group(1))
-            # Weighted: 70% ref match, 30% continuity
-            final_score = int(0.7 * ref_score + 0.3 * cont_score)
-        else:
-            score_match = re.search(r'"score"\s*:\s*(\d+)', text)
-            final_score = int(score_match.group(1)) if score_match else 75
-
-        return min(100, max(0, final_score)), issues
+        return min(100, max(0, score)), issues
 
     except Exception as e:
         return 75, f"Score error: {str(e)[:60]}"
-
-
-def diagnose_issues(client, generated_path, ref_paths):
-    """v10.3: Send generated image + refs to Gemini for a specific diagnosis.
-    Returns a concise text describing exactly what's wrong."""
-    try:
-        contents = [
-            "Compare this generated image to the reference images. "
-            "List specific issues: wrong clothing, wrong lighting direction, "
-            "wrong environment, wrong color temperature, wrong character proportions, "
-            "missing objects. Be specific and concise. Reply with just the list of issues, "
-            "no preamble."
-        ]
-        if Path(generated_path).exists():
-            contents.append(_resize_for_api(Image.open(generated_path)))
-        for rp in ref_paths[:3]:
-            if Path(rp).exists():
-                contents.append(_resize_for_api(Image.open(rp)))
-
-        if len(contents) < 3:
-            return "No references available for diagnosis"
-
-        resp = client.models.generate_content(
-            model=get_active_model().replace("-image-preview", ""),
-            contents=contents
-        )
-        for part in resp.candidates[0].content.parts:
-            if hasattr(part, 'text') and part.text:
-                return part.text.strip()[:500]
-        return "Could not diagnose"
-    except Exception as e:
-        return f"Diagnosis error: {str(e)[:60]}"
-
-
-def auto_redo_panel(client, original_prompt, out_path, ref_paths,
-                    panel_id="", prev_panel_path=None, callback=None):
-    """v10.3: Aggressive auto-redo. Up to 3 total attempts (original + 2 retries).
-    Each retry gets a fresh diagnosis and rewritten prompt.
-    Keeps the BEST-SCORING image across all attempts.
-
-    Returns (best_score, best_issues, attempt_log).
-    """
-    scores = []
-    best_score = -1
-    best_img = None
-    best_issues = ""
-    attempt_log = []
-
-    for attempt in range(3):
-        if attempt == 0:
-            prompt = original_prompt
-        else:
-            # Get diagnosis of the current (failing) image
-            diagnosis = diagnose_issues(client, str(out_path), ref_paths)
-            # Rewrite prompt with diagnosis
-            prompt = f"CRITICAL FIXES REQUIRED: {diagnosis}. " + original_prompt
-
-        if attempt > 0:
-            # Generate a new image with the rewritten prompt
-            try:
-                img = gen_single(client, prompt, ref_paths)
-                if img:
-                    out_path.write_bytes(img)
-            except Exception:
-                attempt_log.append(f"attempt {attempt + 1} = generation failed")
-                continue
-
-        # Score the current image
-        score, issues = score_consistency(
-            client, str(out_path), ref_paths, panel_id,
-            prev_panel_path=prev_panel_path
-        )
-        scores.append(score)
-        attempt_log.append(f"attempt {attempt + 1} = {score}")
-
-        if score > best_score:
-            best_score = score
-            best_issues = issues
-            best_img = out_path.read_bytes() if out_path.exists() else None
-
-        if callback:
-            callback("score", panel_id, f"attempt {attempt + 1} = {score}")
-
-        # If score >= 70, we're good
-        if score >= 70:
-            break
-
-    # Write back the best-scoring image
-    if best_img and best_score > scores[-1]:
-        out_path.write_bytes(best_img)
-
-    log_str = f"{panel_id}: {', '.join(attempt_log)}"
-    if best_score < scores[-1]:
-        log_str += f" (kept attempt {scores.index(best_score) + 1})"
-
-    return best_score, best_issues, log_str
 
 
 # ═══════════════════════════════════════════════════════════

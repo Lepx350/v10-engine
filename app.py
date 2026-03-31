@@ -1,5 +1,5 @@
 """
-Storyboard Visual Engine v10.3 — Web Edition
+Storyboard Visual Engine v7 — Web Edition
 Deploy to Railway.app or run locally.
 Phone: open browser → use from anywhere.
 """
@@ -12,11 +12,9 @@ from engine import (
     active_preset, image_settings, RESOLUTION_MAP, AR_OPTIONS, MODEL_OPTIONS,
     parse_storyboard, get_asset_type, get_image_prompt, get_section,
     detect_characters, detect_environment, count_words,
-    detect_characters_with_context, detect_environments_with_context,
     get_world_anchor, get_primary_style, get_secondary_style,
     get_char_base, get_grade_params, get_char_view_prompt, get_char_sheet_prompt, get_env_prompt,
     get_master_shot_prompt, get_style_anchor_prompt, score_consistency, build_adaptive_prompt, build_prompt,
-    diagnose_issues, auto_redo_panel, extract_color_palette,
     get_config, gen_single, gen_chat_section, extract_image,
     post_process, VisualMemoryBank, adaptive_delay,
     load_config, save_config,
@@ -34,6 +32,7 @@ state = {
     "warnings": [], "output_dir": None, "memory_bank": None,
     "running": False, "stop": False, "log": [], "progress": 0, "total": 0,
     "storyboard_text": "",
+    "current_section": "", "section_progress": {}, "current_panel": "",
 }
 
 def log(msg, tag="info"):
@@ -104,23 +103,15 @@ def upload():
     state["gen"] = gen    # script order — this is what gets generated
 
     warnings = []
-
-    # v10.3: Build section map for context-aware detection
-    sec_panels_map = {}
-    for p in gen:
-        sec = get_section(p)
-        if sec not in sec_panels_map:
-            sec_panels_map[sec] = []
-        sec_panels_map[sec].append(p)
-
-    # v10.3: Smart detection with context propagation, fuzzy match, pronoun inference
-    char_map = detect_characters_with_context(gen, sec_panels_map)
-    env_map = detect_environments_with_context(gen, sec_panels_map)
+    char_map = {}; env_map = {}
 
     for p in gen:
         pid = p['id']
         prompt = get_image_prompt(p)
-        chars = char_map.get(pid, [])
+        vo = p.get('vo', '')
+        chars = detect_characters(prompt, vo)
+        char_map[pid] = chars
+        env_map[pid] = detect_environment(prompt, vo)
         if len(chars) > 1:
             warnings.append(f"{pid}: {len(chars)} chars, using @{chars[0]}")
         if count_words(prompt) > 60:
@@ -350,16 +341,16 @@ def generate_one():
         if bridge and bridge not in refs:
             refs.append(bridge)
 
-    # v10.3: Get color palette for this section if available
-    section_name = get_section(panel)
-    color_palette = mb.get_section_palette(section_name) if mb else None
-
-    # Build prompt with ALL characters (Layer 8) + body type + color palette
-    prompt = build_prompt(panel, primary_char, env_id, all_chars=all_chars,
-                          color_palette_desc=color_palette)
-
-    # v10.3: Get previous panel in section for continuity scoring
-    prev_panel_path = mb.get_prev_panel(section_name) if mb else None
+    # Build prompt with ALL characters (Layer 8) + cinematography (Layer 13)
+    sec_name = get_section(panel)
+    sec_panels = [p for p in gen if get_section(p) == sec_name]
+    sec_total = len(sec_panels)
+    p_idx = next((i for i, p in enumerate(sec_panels) if p.get("id") == panel_id), 0)
+    prompt = build_prompt(
+        panel, primary_char, env_id, all_chars=all_chars,
+        section_name=sec_name, panel_index=p_idx,
+        section_total=sec_total, is_first_in_section=(p_idx == 0)
+    )
 
     try:
         client = get_client(key)
@@ -368,47 +359,38 @@ def generate_one():
             return jsonify(error="No image returned from API"), 500
         out_path.write_bytes(img)
 
-        # ── LAYER 11+12: Consistency scoring + auto-redo (v10.3) ──
+        # ── LAYER 11: Consistency scoring ──
         score = 100
         issues = ""
-        redo_log = ""
         char_refs_for_score = [str(out / "characters" / f"@{c}.png") for c in all_chars
                                if (out / "characters" / f"@{c}.png").exists()]
         if char_refs_for_score and asset != 'fern':
-            score, issues = score_consistency(
-                client, str(out_path), char_refs_for_score, pid,
-                prev_panel_path=prev_panel_path
-            )
+            score, issues = score_consistency(client, str(out_path), char_refs_for_score, pid)
 
-            # v10.3: Aggressive auto-redo if score < 70
-            if score < 70:
-                score, issues, redo_log = auto_redo_panel(
-                    client, prompt, out_path, char_refs_for_score,
-                    panel_id=pid, prev_panel_path=prev_panel_path
-                )
-
-        # v10.3: Extract and lock color palette from first panel of section
-        if mb:
-            if not mb.get_section_palette(section_name) and score >= 70:
-                palette = extract_color_palette(str(out_path))
-                if palette:
-                    mb.set_section_palette(section_name, palette)
+        # ── LAYER 12: Adaptive retry if low score ──
+        if score < 60 and char_refs_for_score:
+            adaptive_prompt = build_adaptive_prompt(prompt, score, issues, attempt=1)
+            retry_img = gen_single(client, adaptive_prompt, refs)
+            if retry_img:
+                out_path.write_bytes(retry_img)
+                score2, issues2 = score_consistency(client, str(out_path), char_refs_for_score, pid)
+                if score2 > score:
+                    score, issues = score2, issues2
 
         # Update memory bank
         if mb:
             if primary_char: mb.update_char(primary_char, str(out_path))
             if env_id: mb.update_env(env_id, str(out_path))
-            mb.update_section(section_name, str(out_path))
-            mb.update_prev_panel(section_name, str(out_path))
+            mb.update_section(get_section(panel), str(out_path))
 
         return jsonify(ok=True, panel_id=panel_id, size=len(img),
-                      consistency_score=score, issues=issues, redo_log=redo_log)
+                      consistency_score=score, issues=issues)
     except Exception as e:
         return jsonify(error=str(e)[:200]), 500
 
 @app.route("/api/stream")
 def stream():
-    """SSE endpoint for real-time log + progress."""
+    """SSE endpoint for real-time log + progress + section tracking."""
     def gen():
         idx = 0
         while True:
@@ -416,7 +398,7 @@ def stream():
                 entry = state["log"][idx]
                 yield f"data: {json.dumps({'type':'log','msg':entry['msg'],'tag':entry['tag']})}\n\n"
                 idx += 1
-            yield f"data: {json.dumps({'type':'progress','done':state['progress'],'total':state['total'],'running':state['running']})}\n\n"
+            yield f"data: {json.dumps({'type':'progress','done':state['progress'],'total':state['total'],'running':state['running'],'current_section':state.get('current_section',''),'section_progress':state.get('section_progress',{}),'current_panel':state.get('current_panel','')})}\n\n"
             time.sleep(0.5)
     return Response(gen(), mimetype="text/event-stream")
 
@@ -886,18 +868,13 @@ def run_full_pipeline(key):
                     if bridge and bridge not in refs:
                         refs.append(bridge)
 
-                # v10.3: Get section color palette
-                color_palette = mb.get_section_palette(sec)
-
-                # ── Layer 8: Pass all chars to prompt builder + v10.3 body type + palette ──
-                prompt = build_prompt(p, primary_char, env_id, all_chars=all_chars,
-                                      color_palette_desc=color_palette)
+                # ── Layer 8: Pass all chars to prompt builder ──
+                prompt = build_prompt(p, primary_char, env_id, all_chars=all_chars)
                 sections[sec].append({
                     "id": pid, "prompt": prompt, "refs": refs,
                     "output": str(out / "scenes" / fname),
                     "info": f"@{','.join(all_chars) if all_chars else '-'} {asset}",
-                    "char": primary_char, "all_chars": all_chars, "env": env_id,
-                    "section": sec, "stop": False,
+                    "char": primary_char, "all_chars": all_chars, "env": env_id, "stop": False,
                 })
 
             total_scenes = len(all_gen)
@@ -919,20 +896,9 @@ def run_full_pipeline(key):
                             mb.update_char(cid, pd["output"])
                         if pd.get("env"):
                             mb.update_env(pd["env"], pd["output"])
-                        sec_name = pd.get("section", get_section_from_pid(pid))
-                        last_output[sec_name] = pd["output"]
-                        # v10.3: Track previous panel for continuity scoring
-                        mb.update_prev_panel(sec_name, pd["output"])
-                        # v10.3: Extract and lock palette from first panel if score >= 70
-                        if not mb.get_section_palette(sec_name):
-                            palette = extract_color_palette(pd["output"])
-                            if palette:
-                                mb.set_section_palette(sec_name, palette)
-                                log(f"  Palette locked: {palette[:60]}...")
+                        last_output[get_section_from_pid(pid)] = pd["output"]
                 elif event == "skip":
                     done_n += 1; prog(done_n, total_scenes)
-                elif event == "score":
-                    log(f"  {args[0]}: {args[1] if len(args)>1 else ''}")
                 elif event == "fail":
                     fail_n += 1; log(f"FAIL {args[0]}: {args[1] if len(args)>1 else ''}", "fail")
 
@@ -1016,18 +982,33 @@ def run_scenes(key, section_filter):
         section_order = list(dict.fromkeys(get_section(p) for p in all_gen))
 
         total = len(target)
-        log(f"STEP 3: {label} ({total} panels, L1-L12)", "head")
+        log(f"STEP 3: {label} ({total} panels, L1-L13)", "head")
 
-        # Group by section
+        # Group by section — track index for Layer 13
         sections = {}
+        section_panel_idx = {}  # {section: current_index}
+        section_panel_totals = {}  # {section: total_count}
         for p in target:
             sec = get_section(p)
             if sec not in sections: sections[sec] = []
+            if sec not in section_panel_totals: section_panel_totals[sec] = 0
+            section_panel_totals[sec] += 1
+
+        # Initialize section progress in state
+        state["section_progress"] = {sec: {"done": 0, "total": section_panel_totals[sec]} for sec in sections}
+
+        panel_sec_index = {}  # {panel_id: index_within_section}
+        for p in target:
+            sec = get_section(p)
+            if sec not in section_panel_idx: section_panel_idx[sec] = 0
             pid = p['id']
             all_chars = state["char_map"].get(pid, [])
             env_id = state["env_map"].get(pid); asset = get_asset_type(p)
             fname = f"{p.get('f', pid)}.png"
             primary_char = all_chars[0] if all_chars else None
+            p_idx = section_panel_idx[sec]
+            panel_sec_index[pid] = p_idx
+            section_panel_idx[sec] += 1
 
             # Layer 8: ALL character refs
             refs = []
@@ -1051,30 +1032,39 @@ def run_scenes(key, section_filter):
                 if bridge and bridge not in refs:
                     refs.append(bridge)
 
-            # v10.3: Get section color palette
-            color_palette = mb.get_section_palette(sec)
-
-            prompt = build_prompt(p, primary_char, env_id, all_chars=all_chars,
-                                  color_palette_desc=color_palette)
+            # Layer 13: pass section context to build_prompt for cinematography
+            prompt = build_prompt(
+                p, primary_char, env_id, all_chars=all_chars,
+                section_name=sec, panel_index=p_idx,
+                section_total=section_panel_totals.get(sec, 20),
+                is_first_in_section=(p_idx == 0)
+            )
             sections[sec].append({
                 "id": pid, "prompt": prompt, "refs": refs,
                 "output": str(out / "scenes" / fname),
                 "info": f"@{','.join(all_chars) if all_chars else '-'} {asset}",
-                "char": primary_char, "all_chars": all_chars, "env": env_id,
-                "section": sec, "stop": False,
+                "char": primary_char, "all_chars": all_chars, "env": env_id, "stop": False,
             })
 
         done = 0; ok_n = 0; fail_n = 0
         last_output = {}
+        _current_sec = [""]  # mutable for closure
 
         def cb(event, *args):
             nonlocal done, ok_n, fail_n
             if event == "generating":
                 done += 1; prog(done, total)
-                log(f"[{done}/{total}] {args[0]} {args[1] if len(args)>1 else ''}")
+                pid = args[0]
+                state["current_panel"] = pid
+                log(f"[{done}/{total}] {pid} {args[1] if len(args)>1 else ''}")
             elif event == "ok":
                 ok_n += 1; pid = args[0]
                 log(f"OK → {pid}", "ok")
+                state["current_panel"] = ""
+                # Update section progress
+                sec = _current_sec[0]
+                if sec and sec in state["section_progress"]:
+                    state["section_progress"][sec]["done"] += 1
                 pd_map = {pd["id"]: pd for sec in sections.values() for pd in sec}
                 if pid in pd_map:
                     pd = pd_map[pid]
@@ -1082,23 +1072,18 @@ def run_scenes(key, section_filter):
                     for cid in pd.get("all_chars", []):
                         mb.update_char(cid, pd["output"])
                     if pd.get("env"): mb.update_env(pd["env"], pd["output"])
-                    sec_name = pd.get("section", get_section(next((p for p in target if p["id"]==pid), target[0])))
-                    last_output[sec_name] = pd["output"]
-                    # v10.3: Track previous panel + palette lock
-                    mb.update_prev_panel(sec_name, pd["output"])
-                    if not mb.get_section_palette(sec_name):
-                        palette = extract_color_palette(pd["output"])
-                        if palette:
-                            mb.set_section_palette(sec_name, palette)
-                            log(f"  Palette locked: {palette[:60]}...")
+                    last_output[get_section(next((p for p in target if p["id"]==pid), target[0]))] = pd["output"]
             elif event == "skip":
                 done += 1; prog(done, total)
-            elif event == "score":
-                log(f"  {args[0]}: {args[1] if len(args)>1 else ''}")
+                sec = _current_sec[0]
+                if sec and sec in state["section_progress"]:
+                    state["section_progress"][sec]["done"] += 1
             elif event == "fail":
                 fail_n += 1; log(f"FAIL {args[0]}: {args[1] if len(args)>1 else ''}", "fail")
+                state["current_panel"] = ""
             elif event == "warn":
                 fail_n += 1; log(f"WARN {args[0]}", "warn")
+                state["current_panel"] = ""
 
         # Stop propagation
         def check_stop():
@@ -1110,12 +1095,16 @@ def run_scenes(key, section_filter):
 
         for sec_name, sec_panels in sections.items():
             if state["stop"]: break
-            log(f"\n--- {sec_name} ({len(sec_panels)} panels, L1-L12) ---", "head")
+            _current_sec[0] = sec_name
+            state["current_section"] = sec_name
+            log(f"\n--- {sec_name} ({len(sec_panels)} panels, L1-L13) ---", "head")
             gen_chat_section(client, sec_name, sec_panels, callback=cb)
             # Layer 10: Save section bridge
             if sec_name in last_output:
                 mb.update_section(sec_name, last_output[sec_name])
 
+        state["current_panel"] = ""
+        state["current_section"] = ""
         log(f"DONE! OK:{ok_n} Fail:{fail_n}", "ok")
     except Exception as e:
         log(f"SCENES ERROR: {str(e)[:120]}", "fail")
@@ -1216,8 +1205,7 @@ def run_export():
                     img_html = f'<img src="data:image/png;base64,{b64}" alt="{pid}">'
                 else:
                     img_html = f'<div class="panel-miss">⏳ Not generated</div>'
-                cold_html = '<span class="b b-cold">COLD OPEN</span>' if cold else ""
-                html += f'<div class="panel">{img_html}<div class="body"><div class="badges"><span class="b b-id">{pid}</span><span class="b b-{asset}">{al}</span>{cold_html}</div>'
+                html += f'<div class="panel">{img_html}<div class="body"><div class="badges"><span class="b b-id">{pid}</span><span class="b b-{asset}">{al}</span>{"<span class=\'b b-cold\'>COLD OPEN</span>" if cold else ""}</div>'
                 if vo: html += f'<div class="vo">🎙 {vo}</div>'
                 if cam: html += f'<div class="cam">🎥 {cam}</div>'
                 chars = state["char_map"].get(pid, [])
