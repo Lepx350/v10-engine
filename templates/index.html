@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#09090b">
-<title>Storyboard Engine v9</title>
+<title>Storyboard Engine v10.4</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -145,8 +145,17 @@ body{font-family:'Outfit',system-ui,sans-serif;background:var(--bg);color:var(--
 .col-b{max-height:0;overflow:hidden;transition:max-height .35s}.col-b.open{max-height:5000px;overflow-y:visible}
 
 /* Section header in panels view */
-.sec-hdr{font-size:13px;font-weight:700;color:var(--v);padding:14px 0 6px;border-bottom:1px solid var(--bdr);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+.sec-hdr{font-size:13px;font-weight:700;color:var(--v);padding:14px 0 6px;border-bottom:1px solid var(--bdr);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px}
 .sec-hdr .sec-cnt{font-family:'Geist Mono',monospace;font-size:10px;color:var(--t3)}
+.sec-prog{width:100%;height:2px;background:var(--sf);border-radius:1px;overflow:hidden;margin-top:4px}
+.sec-prog-fill{height:100%;border-radius:1px;width:0;background:linear-gradient(90deg,var(--m),var(--v));transition:width .4s}
+.sec-hdr .sec-active{font-family:'Geist Mono',monospace;font-size:9px;color:var(--a);margin-left:6px}
+
+/* Generating pulse on active panel */
+.panel.generating{border-color:var(--a);box-shadow:0 0 12px rgba(251,191,36,.15);animation:gen-pulse 1.5s ease-in-out infinite}
+@keyframes gen-pulse{0%,100%{border-color:var(--a);box-shadow:0 0 8px rgba(251,191,36,.1)}50%{border-color:var(--v);box-shadow:0 0 16px rgba(167,139,250,.2)}}
+.panel.generating .panel-img .empty-shot .big{animation:spin 3s linear infinite;color:var(--a)}
+.panel.generating .panel-id{color:var(--a)}
 
 .hidden{display:none!important}
 @media(min-width:768px){.app{max-width:600px;margin:0 auto}.hdr{max-width:600px;margin:0 auto}.gal{grid-template-columns:repeat(4,1fr)}.gal-env{grid-template-columns:repeat(3,1fr)}}
@@ -160,7 +169,7 @@ body{font-family:'Outfit',system-ui,sans-serif;background:var(--bg);color:var(--
 
 <div class="hdr">
   <div class="hdr-i">S</div>
-  <div><h1>Storyboard Engine</h1><small>v10 · cloud · 12-layer</small></div>
+  <div><h1>Storyboard Engine</h1><small>v10.4 · cloud · L1-L13</small></div>
   <div class="hdr-r"><span id="statusText">Ready</span><div class="dot" id="dot"></div></div>
 </div>
 
@@ -331,16 +340,20 @@ function renderPanels(){
       const secPanels=allPanels.filter(x=>x.section===curSec);
       const secDone=secPanels.filter(x=>x.done).length;
       const allDone=secDone===secPanels.length;
-      html+=`<div class="sec-hdr" onclick="toggleSec('sec-body-${secIdx}',this)" style="cursor:pointer">
-        ${curSec}<span class="sec-cnt">${secDone}/${secPanels.length} ${allDone?'✓':''}</span>
-        <span class="ch" style="font-size:10px;color:var(--t3);margin-left:8px;transition:.3s">▼</span>
+      html+=`<div class="sec-hdr" data-section="${curSec}" onclick="toggleSec('sec-body-${secIdx}',this)" style="cursor:pointer">
+        <span>${curSec}</span>
+        <span style="display:flex;align-items:center;gap:6px">
+          <span class="sec-cnt" id="sec-cnt-${secIdx}" data-section="${curSec}">${secDone}/${secPanels.length} ${allDone?'✓':''}</span>
+          <span class="ch" style="font-size:10px;color:var(--t3);transition:.3s">▼</span>
+        </span>
+        <div class="sec-prog" id="sec-prog-${secIdx}" data-section="${curSec}"><div class="sec-prog-fill" id="sec-prog-fill-${secIdx}"></div></div>
       </div>
       <div class="col-b open" id="sec-body-${secIdx}">`;
     }
     const done=p.done;
     const imgSrc=done?`/api/preview/${p.id}`:'';
     const badge=p.type==='noir'?'badge-noir':'badge-fern';
-    html+=`<div class="panel ${done?'done':''}" id="panel-${p.id}">
+    html+=`<div class="panel ${done?'done':''}" id="panel-${p.id}" data-section="${p.section}">
       <div class="panel-img" ${done?`onclick="openPv('${imgSrc}','${p.id}')"`:''}">
         ${done?`<img src="${imgSrc}" loading="lazy">`:`<div class="empty-shot"><div class="big">◇</div><span style="font-size:10px;font-family:'Geist Mono',monospace">${p.id}</span></div>`}
       </div>
@@ -596,7 +609,7 @@ function setRunning(v){
 }
 
 // SSE
-let evtSource=null,sseRetries=0;
+let evtSource=null,sseRetries=0,_lastGenPanel='';
 function startSSE(){
   if(evtSource)evtSource.close();sseRetries=0;
   evtSource=new EventSource('/api/stream');
@@ -614,7 +627,66 @@ function startSSE(){
       const pct=d.total?(d.done/d.total*100):0;
       $('progFill').style.width=pct+'%';
       $('progText').textContent=d.total?`${d.done}/${d.total} · ${Math.round(pct)}%`:'';
+
+      // Per-section progress bars
+      if(d.section_progress){
+        document.querySelectorAll('.sec-prog-fill').forEach(el=>{
+          const secName=el.parentElement.dataset.section;
+          if(secName && d.section_progress[secName]){
+            const sp=d.section_progress[secName];
+            const spPct=sp.total?(sp.done/sp.total*100):0;
+            el.style.width=spPct+'%';
+          }
+        });
+        // Update section counters live
+        document.querySelectorAll('[id^="sec-cnt-"]').forEach(el=>{
+          const secName=el.dataset.section;
+          if(secName && d.section_progress[secName]){
+            const sp=d.section_progress[secName];
+            const allDone=sp.done===sp.total;
+            el.textContent=`${sp.done}/${sp.total} ${allDone?'✓':''}`;
+          }
+        });
+      }
+
+      // Highlight current section header
+      document.querySelectorAll('.sec-hdr').forEach(el=>{
+        const isActive=el.dataset.section===d.current_section;
+        const badge=el.querySelector('.sec-active');
+        if(isActive && !badge){
+          const s=document.createElement('span');s.className='sec-active';s.textContent='● generating';
+          el.querySelector('span')?.after(s);
+        } else if(!isActive && badge){
+          badge.remove();
+        }
+      });
+
+      // Generating pulse on current panel + auto-scroll
+      const curPanel=d.current_panel||'';
+      if(curPanel!==_lastGenPanel){
+        // Remove old pulse
+        if(_lastGenPanel){
+          const old=$('panel-'+_lastGenPanel);
+          if(old)old.classList.remove('generating');
+        }
+        // Add new pulse
+        if(curPanel){
+          const card=$('panel-'+curPanel);
+          if(card){
+            card.classList.add('generating');
+            // Auto-scroll to generating panel (only if on shots tab)
+            if(activeTab==='shots'){
+              card.scrollIntoView({behavior:'smooth',block:'center'});
+            }
+          }
+        }
+        _lastGenPanel=curPanel;
+      }
+
       if(!d.running&&isRunning){
+        // Clean up generating state
+        if(_lastGenPanel){const old=$('panel-'+_lastGenPanel);if(old)old.classList.remove('generating');_lastGenPanel=''}
+        document.querySelectorAll('.sec-active').forEach(el=>el.remove());
         setRunning(false);
         if(currentRunStep==='export'){toast('Export ready!');setTimeout(()=>{window.location.href='/api/export_html'},500)}
         else{toast('Done ✓');loadPanels();loadRefs();switchTab('shots')}
