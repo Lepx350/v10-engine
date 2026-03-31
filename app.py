@@ -19,6 +19,7 @@ from engine import (
     post_process, VisualMemoryBank, adaptive_delay,
     load_config, save_config,
     load_dynamic_characters, get_active_characters,
+    load_dynamic_environments, get_active_environments, get_active_master_shots,
 )
 import engine
 
@@ -26,7 +27,7 @@ app = Flask(__name__)
 
 # ── STATE ──
 state = {
-    "panels": [], "noir": [], "fern": [],
+    "panels": [], "noir": [], "fern": [], "gen": [],
     "char_map": {}, "env_map": {}, "used_chars": [], "used_envs": [],
     "warnings": [], "output_dir": None, "memory_bank": None,
     "running": False, "stop": False, "log": [], "progress": 0, "total": 0,
@@ -78,6 +79,9 @@ def upload():
     # Auto-extract characters from storyboard
     load_dynamic_characters(text)
 
+    # Auto-extract environments from storyboard (or auto-detect from panels)
+    load_dynamic_environments(text, panels)
+
     # Setup output dirs
     out = upload_dir / "generated_images"
     for d in ["characters",
@@ -89,12 +93,14 @@ def upload():
     state["output_dir"] = out
     state["memory_bank"] = VisualMemoryBank(out)
 
+    # Generate in SCRIPT ORDER — no noir/fern grouping
     noir = [p for p in panels if get_asset_type(p) == 'noir' and get_image_prompt(p)]
     fern = [p for p in panels if get_asset_type(p) == 'fern' and get_image_prompt(p)]
-    state["noir"] = noir
-    state["fern"] = fern
+    gen = [p for p in panels if get_asset_type(p) in ('noir', 'fern') and get_image_prompt(p)]
+    state["noir"] = noir  # kept for stats only
+    state["fern"] = fern  # kept for stats only
+    state["gen"] = gen    # script order — this is what gets generated
 
-    gen = noir + fern
     warnings = []
     char_map = {}; env_map = {}
 
@@ -244,7 +250,7 @@ def list_panels():
     if not state["output_dir"] or not state["panels"]:
         return jsonify(panels=[])
     out = state["output_dir"]
-    gen = state.get("noir", []) + state.get("fern", [])
+    gen = state.get("gen", [])
     result = []
     for p in gen:
         pid = p.get("id", "")
@@ -282,7 +288,7 @@ def generate_one():
         return jsonify(error="No API key"), 400
 
     # Find panel
-    gen = state.get("noir", []) + state.get("fern", [])
+    gen = state.get("gen", [])
     panel = None
     for p in gen:
         if p.get("id") == panel_id:
@@ -453,13 +459,13 @@ def pipeline_status():
         env_path = out / "environments" / f"{eid}.png"
         master_path = out / "master_shots" / f"{eid}_master.png"
         envs_done.append({
-            "id": eid, "name": ENVIRONMENTS.get(eid, {}).get("name", eid),
+            "id": eid, "name": get_active_environments().get(eid, {}).get("name", eid),
             "env": env_path.exists(),
             "master": master_path.exists(),
         })
 
     # Scenes
-    gen = state.get("noir", []) + state.get("fern", [])
+    gen = state.get("gen", [])
     scenes_done = sum(1 for p in gen if any(
         (out / d / f"{p.get('f', p['id'])}.png").exists()
         for d in ["final", "post_processed", "scenes"]
@@ -539,6 +545,50 @@ def redo_ref():
             if p.exists(): p.unlink()
             img = gen_single(client, get_style_anchor_prompt())
             if img: p.write_bytes(img); return jsonify(ok=True)
+        return jsonify(error="No image returned"), 500
+    except Exception as e:
+        return jsonify(error=str(e)[:200]), 500
+
+@app.route("/api/edit_ref", methods=["POST"])
+def edit_ref():
+    """Regenerate a ref image with a custom prompt. Style prefix auto-injected."""
+    if not state["output_dir"]:
+        return jsonify(error="No storyboard loaded"), 400
+    data = request.json or {}
+    ref_type = data.get("ref_type")
+    ref_id = data.get("ref_id")
+    custom_prompt = data.get("custom_prompt", "")
+    key = data.get("api_key") or load_config().get("api_key") or os.environ.get("GEMINI_API_KEY")
+    if not key:
+        return jsonify(error="No API key"), 400
+    if not ref_type or not ref_id or not custom_prompt:
+        return jsonify(error="Missing ref_type, ref_id, or custom_prompt"), 400
+
+    out = state["output_dir"]
+
+    # Auto-inject style based on ref type
+    if ref_type == "char":
+        styled_prompt = get_char_base() + custom_prompt
+        p = out / "characters" / f"@{ref_id}.png"
+    elif ref_type == "env":
+        styled_prompt = get_world_anchor() + get_primary_style() + custom_prompt
+        p = out / "environments" / f"{ref_id}.png"
+    elif ref_type == "master":
+        styled_prompt = get_world_anchor() + get_primary_style() + custom_prompt
+        p = out / "master_shots" / f"{ref_id}_master.png"
+    elif ref_type == "style_anchor":
+        styled_prompt = get_world_anchor() + get_primary_style() + custom_prompt
+        p = out / "style_anchor" / "style_key.png"
+    else:
+        return jsonify(error=f"Unknown ref type: {ref_type}"), 400
+
+    try:
+        if p.exists(): p.unlink()
+        client = get_client(key)
+        img = gen_single(client, styled_prompt)
+        if img:
+            p.write_bytes(img)
+            return jsonify(ok=True, size=len(img))
         return jsonify(error="No image returned"), 500
     except Exception as e:
         return jsonify(error=str(e)[:200]), 500
@@ -750,7 +800,7 @@ def run_full_pipeline(key):
         log("STEP 3: SCENES", "head")
         state["running"] = True  # keep alive
         mb = state["memory_bank"]
-        all_gen = state["noir"] + state["fern"]
+        all_gen = state.get("gen", [])
         remaining = [p for p in all_gen if not any(
             (out / d / f"{p.get('f', p['id'])}.png").exists()
             for d in ["final", "post_processed", "scenes"]
@@ -764,7 +814,7 @@ def run_full_pipeline(key):
                 if sheet.exists():
                     char_refs[cid] = [str(sheet)]
             env_refs = {}
-            for eid in ENVIRONMENTS:
+            for eid in get_active_environments():
                 master = out / "master_shots" / f"{eid}_master.png"
                 basic = out / "environments" / f"{eid}.png"
                 if master.exists(): env_refs[eid] = str(master)
@@ -896,7 +946,7 @@ def run_scenes(key, section_filter):
         client = get_client(key)
         out = state["output_dir"]
         mb = state["memory_bank"]
-        all_gen = state["noir"] + state["fern"]
+        all_gen = state.get("gen", [])
 
         target = all_gen if section_filter == "__ALL__" else [p for p in all_gen if get_section(p) == section_filter]
         label = "ALL" if section_filter == "__ALL__" else section_filter
@@ -909,7 +959,7 @@ def run_scenes(key, section_filter):
                 char_refs[cid] = [str(sheet)]
 
         env_refs = {}
-        for eid in ENVIRONMENTS:
+        for eid in get_active_environments():
             master = out / "master_shots" / f"{eid}_master.png"
             basic = out / "environments" / f"{eid}.png"
             if master.exists(): env_refs[eid] = str(master)

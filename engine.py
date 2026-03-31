@@ -1,28 +1,7 @@
 """
-═══════════════════════════════════════════════════════════════════
-  STORYBOARD VISUAL ENGINE v7
-  Purpose-built for storyboard → cinematic image pipeline
-═══════════════════════════════════════════════════════════════════
-  Consistency Layers:
-    L1: Multi-angle character refs (front / 3/4 / action)
-    L2: Environment refs (key locations)
-    L3: World anchor (persistent rules in every prompt)
-    L4: Multi-turn chat (grouped by section)
-    L5: Post-processing (teal-orange grade + vignette + grain)
-    L6: Master Shots (hero render per location, shared globally)
-    L7: Visual Memory Bank (latest successful render per char/env,
-        carried across sections so ABC stays ABC forever)
-
-  Rules:
-    • 1 character per panel (warn if 2+ detected)
-    • Max 60 words per prompt (warn if exceeded)
-    • Style prefix injected by tool, not in prompt
-    • Media Video REMOVED — fully AI-generated pipeline
-    • GFX removed in v3 — fully 3D pipeline (Noir + Fern only)
-    • Cold Open: Noir only
-
-  Setup:
-    Double-click this file to run
+STORYBOARD VISUAL ENGINE v10
+12-Layer Consistency Engine -- Project-agnostic
+All content (characters, environments) loaded from JSX storyboard files.
 """
 
 import os, re, json, time, sys, base64, threading, shutil
@@ -34,464 +13,344 @@ from google import genai
 from google.genai import types
 from PIL import Image, ImageDraw
 
+# ═══════════════════════════════════════════════════════════
+# STYLE PRESETS -- Select in UI dropdown
+# ═══════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════
-# STYLE PRESETS — Select in UI dropdown or paste custom
-# ═══════════════════════════════════════════════════════════
 STYLE_PRESETS = {
-    "Noir Documentary (Faceless 3D)": {
-        "world_anchor": (
-            "PERSISTENT WORLD RULES: "
-            "All human characters are faceless mannequins with completely smooth heads — "
-            "NO eyes, NO nose, NO mouth, NO facial features. "
-            "Skin is smooth matte mannequin plastic. "
-            "Color palette: desaturated teal and warm orange tones. "
-            "Lighting: dramatic single-source with volumetric god rays, deep shadows. "
-            "Film grain and vignette on every image. "
-            "16:9 widescreen. Unreal Engine 5 photorealistic PBR. "
-            "NEVER: cartoon, anime, 2D, text overlays, facial features. "
-        ),
-        "primary": (
-            "3D-rendered cinematic documentary scene. "
-            "Faceless mannequin figures with smooth featureless heads. "
-            "Realistic body proportions, era-appropriate clothing with fabric detail. "
-            "Photorealistic PBR environment. "
-            "Characters in dynamic mid-action poses, never idle. "
-            "Cinematic 35-85mm lens, shallow depth of field, anamorphic bokeh. "
-            "Dramatic single-source lighting with volumetric god rays, deep shadows. "
-            "Desaturated teal-and-orange color grade, film grain, vignette. "
-            "Mood: noir-documentary, investigative, atmospheric. "
-        ),
-        "secondary": (
-            "3D tech documentary style, premium YouTube video essay aesthetic. "
-            "Isometric or orthographic camera angle. "
-            "Smooth matte clay-like materials and soft plastics. "
-            "Glowing neon accents and LED lights on dark moody background. "
-            "Global illumination, soft shadows, ambient occlusion. "
-            "Abstract representation of technology, data, or infrastructure. "
-            "Sleek, polished, professional. Blender Cycles quality. "
-            "No clutter, no grime, no cartoon, no 2D. "
-        ),
-        "char_base": (
-            "3D-rendered cinematic documentary scene. "
-            "Faceless mannequin figure with completely smooth head — no eyes, nose, mouth. "
-            "Realistic body proportions, era-appropriate clothing with fabric detail. "
-            "Photorealistic PBR environment. "
-            "Cinematic 85mm lens, shallow depth of field, anamorphic bokeh. "
-            "Dramatic single-source lighting with volumetric god rays, deep shadows. "
-            "Desaturated teal-and-orange color grade, film grain, vignette. "
-            "Unreal Engine 5 quality. No cartoon, no anime, no text, no facial features. "
-        ),
-        "grade": {"desat": 0.15, "teal_r": -12, "teal_g": 6, "teal_b": 15, "warm_r": 12, "warm_g": 4, "warm_b": -8, "contrast": 1.08, "vignette": 0.25, "grain": 6},
-    },
-    "Photorealistic Documentary": {
-        "world_anchor": (
-            "PERSISTENT WORLD RULES: "
-            "Photorealistic photography style. Real human faces with natural expressions. "
-            "Shot on ARRI Alexa Mini, Zeiss Master Prime lenses. "
-            "Natural color grade, slight desaturation. "
-            "Documentary cinematography — observational, intimate, authentic. "
-            "16:9 widescreen. High dynamic range. "
-            "NEVER: cartoon, anime, 3D render look, plastic skin, mannequin. "
-        ),
-        "primary": (
-            "Photorealistic documentary photograph. Real human with natural skin texture and features. "
-            "ARRI Alexa Mini, 35-85mm Zeiss Master Prime, shallow depth of field. "
-            "Natural single-source lighting — practical lights, window light, overhead fluorescent. "
-            "Muted color palette, slight blue shadows, warm highlights. "
-            "Mood: intimate, observational, journalistic. "
-        ),
-        "secondary": (
-            "Clean photographic infographic style. "
-            "Shot from above on dark surface — objects arranged for explanation. "
-            "Soft even lighting, minimal shadows. "
-            "Educational, clear, premium documentary B-roll aesthetic. "
-        ),
-        "char_base": (
-            "Photorealistic portrait photograph. Real human with natural skin, hair, and facial features. "
-            "ARRI Alexa Mini, 85mm lens, f/2.0, shallow depth of field. "
-            "Natural studio lighting — soft key light, subtle fill, dark background. "
-            "Muted documentary color grade. No cartoon, no 3D render look. "
-        ),
-        "grade": {"desat": 0.08, "teal_r": -5, "teal_g": 3, "teal_b": 8, "warm_r": 6, "warm_g": 2, "warm_b": -4, "contrast": 1.05, "vignette": 0.20, "grain": 4},
-    },
-    "Anime Documentary": {
-        "world_anchor": (
-            "PERSISTENT WORLD RULES: "
-            "Japanese anime art style. 2D hand-drawn aesthetic with cel shading. "
-            "Characters have expressive anime faces — large eyes, detailed hair, emotional expressions. "
-            "Backgrounds are detailed painted environments. "
-            "16:9 widescreen. Studio Bones / MAPPA quality animation frames. "
-            "NEVER: 3D render, photorealistic, clay, pixel art, western cartoon. "
-        ),
-        "primary": (
-            "Anime key frame illustration. Japanese animation studio quality. "
-            "Dramatic anime cinematography — dynamic angles, speed lines where appropriate. "
-            "Rich painted backgrounds with atmospheric depth. "
-            "Cel-shaded characters with detailed clothing and expressive body language. "
-            "Dramatic anime lighting — rim lights, color-coded shadows, lens flares. "
-            "Mood: intense, cinematic, emotionally charged. "
-        ),
-        "secondary": (
-            "Anime explainer style. Clean chibi or simplified character proportions. "
-            "Whiteboard or chalkboard aesthetic with hand-drawn diagrams. "
-            "Soft pastel colors, clear visual hierarchy. "
-            "Educational anime aesthetic — think Cells at Work or Dr. Stone explanation scenes. "
-        ),
-        "char_base": (
-            "Anime character design sheet. Japanese animation studio quality. "
-            "Full body front view and 3/4 view side by side. "
-            "Detailed anime face — distinctive eye color and shape, unique hairstyle. "
-            "Era-appropriate costume with fabric detail and accessories. "
-            "Clean lines, cel shading, neutral background. "
-        ),
-        "grade": {"desat": 0.0, "teal_r": 0, "teal_g": 0, "teal_b": 0, "warm_r": 0, "warm_g": 0, "warm_b": 0, "contrast": 1.10, "vignette": 0.10, "grain": 0},
-    },
-    "Comic Book / Graphic Novel": {
-        "world_anchor": (
-            "PERSISTENT WORLD RULES: "
-            "Western comic book art style. Bold ink lines, halftone dot shading. "
-            "Characters have stylized but realistic proportions — not chibi, not hyper-real. "
-            "Strong blacks, limited color palette with flat colors and dramatic shadows. "
-            "16:9 widescreen panel composition. DC/Marvel graphic novel quality. "
-            "NEVER: anime, photorealistic, 3D render, watercolor, pixel art. "
-        ),
-        "primary": (
-            "Comic book panel illustration. Bold ink outlines, halftone dot shading. "
-            "Dramatic noir-influenced composition — deep shadows, stark contrasts. "
-            "Limited color palette — 4-5 colors per scene maximum. "
-            "Dynamic poses and dramatic camera angles. "
-            "Style reference: Sean Phillips, Alex Maleev, David Mazzucchelli. "
-            "Mood: gritty, noir, graphic. "
-        ),
-        "secondary": (
-            "Comic book infographic panel. Blueprint aesthetic with technical cross-section views. "
-            "White lines on dark blue background. Callout labels and arrows. "
-            "Clean technical illustration meets comic book aesthetic. "
-        ),
-        "char_base": (
-            "Comic book character design. Bold ink outlines, flat color fills. "
-            "Front view and 3/4 view side by side. "
-            "Stylized but anatomically correct proportions. "
-            "Distinctive silhouette and costume design. Strong shadow shapes. "
-            "Halftone shading. Neutral background. Graphic novel quality. "
-        ),
-        "grade": {"desat": 0.05, "teal_r": -8, "teal_g": 0, "teal_b": 10, "warm_r": 8, "warm_g": 2, "warm_b": -6, "contrast": 1.15, "vignette": 0.15, "grain": 3},
-    },
-    "Cyberpunk Neon Noir": {
-        "world_anchor": (
-            "PERSISTENT WORLD RULES: "
-            "Cyberpunk neon noir aesthetic. Rain-soaked futuristic city. "
-            "Characters have augmented cybernetic features mixed with streetwear. "
-            "Dominant colors: electric blue, hot pink, toxic green neon against dark backgrounds. "
-            "Holographic UI elements floating in environment. "
-            "16:9 widescreen. Unreal Engine 5 quality. "
-            "NEVER: daylight, cartoon, clean/sterile, natural environments. "
-        ),
-        "primary": (
-            "Cyberpunk cinematic scene. Rain-soaked streets, neon reflections on wet asphalt. "
-            "Volumetric fog and atmospheric haze. Holographic advertisements in background. "
-            "Cinematic 35mm anamorphic lens, extreme depth. "
-            "Dominant neon blue and pink lighting with deep shadows. "
-            "Blade Runner meets Ghost in the Shell meets Akira aesthetic. "
-            "Mood: dystopian, noir, electric. "
-        ),
-        "secondary": (
-            "Cyberpunk holographic UI explainer. Floating translucent data visualizations. "
-            "Wireframe 3D models with neon edge lighting on dark void background. "
-            "Sci-fi tech aesthetic — think Minority Report UI or Iron Man HUD. "
-        ),
-        "char_base": (
-            "Cyberpunk character design. Neon-lit portrait against dark rain-soaked backdrop. "
-            "Front view and 3/4 view side by side. "
-            "Streetwear mixed with cybernetic augmentations. "
-            "Neon rim lighting, wet surface reflections. "
-            "Detailed face with cyber-enhancements. Blade Runner 2049 aesthetic. "
-        ),
-        "grade": {"desat": 0.0, "teal_r": -15, "teal_g": 5, "teal_b": 20, "warm_r": 15, "warm_g": -5, "warm_b": 10, "contrast": 1.12, "vignette": 0.30, "grain": 5},
-    },
-    "Vintage Film (70s Grain)": {
-        "world_anchor": (
-            "PERSISTENT WORLD RULES: "
-            "1970s film photography aesthetic. Shot on Kodak Ektachrome 64T film stock. "
-            "Warm amber color cast, heavy film grain, slight lens softness. "
-            "Natural available light — practicals, tungsten, daylight through windows. "
-            "Vintage clothing and environments accurate to the 1970s. "
-            "16:9 widescreen. Real photography, not illustration. "
-            "NEVER: digital look, sharp/clinical, modern objects, neon, anime. "
-        ),
-        "primary": (
-            "1970s documentary photograph on Kodak film stock. Heavy visible film grain. "
-            "Warm amber and brown tones with faded blacks. Slight lens softness at edges. "
-            "Available light only — practical lamps, sunlight, overhead fluorescent. "
-            "Period-accurate environments and wardrobe. "
-            "Style reference: Alan Pakula, Sidney Lumet cinematography. "
-            "Mood: paranoid, gritty, authentic. "
-        ),
-        "secondary": (
-            "1970s educational filmstrip aesthetic. Vintage overhead projector look. "
-            "Faded colors, rounded corners, light leak effects. "
-            "Simple diagrams with hand-drawn labels on yellowed paper. "
-        ),
-        "char_base": (
-            "1970s portrait photograph on Kodak film stock. Heavy grain, warm amber tones. "
-            "Front view and 3/4 view side by side. "
-            "Natural available light, shallow depth of field. "
-            "Period-accurate clothing and hairstyle. "
-            "Slight lens softness. Documentary portrait style. "
-        ),
-        "grade": {"desat": 0.10, "teal_r": 5, "teal_g": -3, "teal_b": -10, "warm_r": 18, "warm_g": 8, "warm_b": -5, "contrast": 1.03, "vignette": 0.35, "grain": 12},
-    },
-    "Oil Painting / Classical": {
-        "world_anchor": (
-            "PERSISTENT WORLD RULES: "
-            "Classical oil painting on canvas. Visible brushstrokes, rich impasto texture. "
-            "Rembrandt and Caravaggio chiaroscuro lighting — dramatic single source. "
-            "Deep rich colors — burnt sienna, raw umber, cadmium yellow, ultramarine blue. "
-            "Gallery-quality fine art, museum-worthy composition. "
-            "16:9 widescreen. Traditional oil painting medium. "
-            "NEVER: digital art, photorealistic, cartoon, anime, flat colors. "
-        ),
-        "primary": (
-            "Classical oil painting on canvas. Rich impasto brushstrokes visible in texture. "
-            "Chiaroscuro lighting — single dramatic light source, deep shadow. "
-            "Old master composition and color palette — warm earth tones, deep blues. "
-            "Figures have weight and presence, draped in rich fabrics. "
-            "Style reference: Rembrandt, Caravaggio, Vermeer. "
-            "Mood: dramatic, timeless, gravitas. "
-        ),
-        "secondary": (
-            "Technical illustration in old master drawing style. "
-            "Sepia ink on parchment paper. Leonardo da Vinci notebook aesthetic. "
-            "Cross-section diagrams with handwritten labels. Aged paper texture. "
-        ),
-        "char_base": (
-            "Classical oil portrait painting. Rich brushwork, canvas texture visible. "
-            "Front view and 3/4 view side by side. "
-            "Chiaroscuro lighting — dramatic single source. "
-            "Deep rich earth tone palette. Gallery-worthy composition. "
-            "Old master portrait style — Rembrandt, Caravaggio influence. "
-        ),
-        "grade": {"desat": 0.05, "teal_r": 0, "teal_g": -5, "teal_b": -8, "warm_r": 15, "warm_g": 8, "warm_b": -3, "contrast": 1.06, "vignette": 0.30, "grain": 2},
-    },
-    "Watercolor / Storybook": {
-        "world_anchor": (
-            "PERSISTENT WORLD RULES: "
-            "Delicate watercolor painting on textured paper. Visible paper grain and water blooms. "
-            "Soft diffused edges, subtle color bleeding between shapes. "
-            "Pastel and muted color palette — soft blues, warm pinks, sage greens, cream. "
-            "Gentle and contemplative mood. Children's book illustration quality. "
-            "16:9 widescreen. Traditional watercolor medium. "
-            "NEVER: photorealistic, harsh shadows, neon colors, anime, digital look. "
-        ),
-        "primary": (
-            "Watercolor illustration on textured cold-pressed paper. "
-            "Visible paper grain, soft wet-on-wet color bleeds, delicate dry brush details. "
-            "Soft diffused natural lighting — no harsh shadows. "
-            "Muted pastel palette with occasional deeper accent colors. "
-            "Style reference: Shaun Tan, Jon Klassen, Beatrix Potter. "
-            "Mood: gentle, contemplative, melancholic beauty. "
-        ),
-        "secondary": (
-            "Watercolor diagram on cream paper. Soft hand-painted labels and arrows. "
-            "Botanical illustration precision meets watercolor softness. "
-            "Educational diagram with artistic beauty. Aged paper texture. "
-        ),
-        "char_base": (
-            "Watercolor character illustration on textured paper. "
-            "Front view and 3/4 view side by side. "
-            "Soft edges, visible paper grain, subtle color bleeding. "
-            "Gentle muted palette. Delicate brushwork. "
-            "Children's book illustration quality. Cream paper background. "
-        ),
-        "grade": {"desat": 0.0, "teal_r": 0, "teal_g": 2, "teal_b": 5, "warm_r": 5, "warm_g": 3, "warm_b": 0, "contrast": 1.02, "vignette": 0.10, "grain": 0},
-    },
-    "Clay / Stop Motion": {
-        "world_anchor": (
-            "PERSISTENT WORLD RULES: "
-            "Claymation stop-motion animation style. Characters and environments made of clay and plasticine. "
-            "Visible fingerprints and tool marks on surfaces. Miniature practical sets. "
-            "Warm studio lighting with soft shadows. Slightly textured, handmade quality. "
-            "16:9 widescreen. Laika Studios / Aardman quality. "
-            "NEVER: photorealistic, anime, flat 2D, digital smooth surfaces. "
-        ),
-        "primary": (
-            "Claymation stop-motion scene. Characters sculpted from plasticine clay. "
-            "Miniature practical set with handcrafted props and environments. "
-            "Visible fingerprints and sculpting tool marks on all surfaces. "
-            "Warm studio lighting, soft shadows, shallow depth of field from macro lens. "
-            "Tilt-shift miniature effect. Coraline / Kubo quality. "
-            "Mood: tactile, handcrafted, charming but slightly eerie. "
-        ),
-        "secondary": (
-            "Claymation diorama cutaway. Miniature cross-section model on turntable. "
-            "Clay and wire armature visible in educational explainer style. "
-            "Warm studio lighting, clean presentation. "
-        ),
-        "char_base": (
-            "Claymation character design. Sculpted plasticine clay figure. "
-            "Front view and 3/4 view side by side on miniature turntable. "
-            "Visible fingerprints, handmade texture. Wire armature poseable joints. "
-            "Warm studio lighting. Macro lens shallow depth of field. "
-            "Laika Studios quality — Coraline, Kubo aesthetic. "
-        ),
-        "grade": {"desat": 0.0, "teal_r": 0, "teal_g": 2, "teal_b": 0, "warm_r": 10, "warm_g": 6, "warm_b": 0, "contrast": 1.04, "vignette": 0.15, "grain": 2},
-    },
+"Noir Documentary (Faceless 3D)": {
+"world_anchor": (
+"PERSISTENT WORLD RULES: "
+"All human characters are faceless mannequins with completely smooth heads -- "
+"NO eyes, NO nose, NO mouth, NO facial features. "
+"Skin is smooth matte mannequin plastic. "
+"Color palette: desaturated teal and warm orange tones. "
+"Lighting: dramatic single-source with volumetric god rays, deep shadows. "
+"Film grain and vignette on every image. "
+"16:9 widescreen. Unreal Engine 5 photorealistic PBR. "
+"NEVER: cartoon, anime, 2D, text overlays, facial features. "
+),
+"primary": (
+"3D-rendered cinematic documentary scene. "
+"Faceless mannequin figures with smooth featureless heads. "
+"Realistic body proportions, era-appropriate clothing with fabric detail. "
+"Photorealistic PBR environment. "
+"Characters in dynamic mid-action poses, never idle. "
+"Cinematic 35-85mm lens, shallow depth of field, anamorphic bokeh. "
+"Dramatic single-source lighting with volumetric god rays, deep shadows. "
+"Desaturated teal-and-orange color grade, film grain, vignette. "
+"Mood: noir-documentary, investigative, atmospheric. "
+),
+"secondary": (
+"3D tech documentary style, premium YouTube video essay aesthetic. "
+"Isometric or orthographic camera angle. "
+"Smooth matte clay-like materials and soft plastics. "
+"Glowing neon accents and LED lights on dark moody background. "
+"Global illumination, soft shadows, ambient occlusion. "
+"Abstract representation of technology, data, or infrastructure. "
+"Sleek, polished, professional. Blender Cycles quality. "
+"No clutter, no grime, no cartoon, no 2D. "
+),
+"char_base": (
+"3D-rendered cinematic documentary scene. "
+"Faceless mannequin figure with completely smooth head -- no eyes, nose, mouth. "
+"Realistic body proportions, era-appropriate clothing with fabric detail. "
+"Photorealistic PBR environment. "
+"Cinematic 85mm lens, shallow depth of field, anamorphic bokeh. "
+"Dramatic single-source lighting with volumetric god rays, deep shadows. "
+"Desaturated teal-and-orange color grade, film grain, vignette. "
+"Unreal Engine 5 quality. No cartoon, no anime, no text, no facial features. "
+),
+"grade": {"desat": 0.15, "teal_r": -12, "teal_g": 6, "teal_b": 15, "warm_r": 12, "warm_g": 4, "warm_b": -8, "contrast": 1.08, "vignette": 0.25, "grain": 6},
+},
+"Photorealistic Documentary": {
+"world_anchor": (
+"PERSISTENT WORLD RULES: "
+"Photorealistic photography style. Real human faces with natural expressions. "
+"Shot on ARRI Alexa Mini, Zeiss Master Prime lenses. "
+"Natural color grade, slight desaturation. "
+"Documentary cinematography -- observational, intimate, authentic. "
+"16:9 widescreen. High dynamic range. "
+"NEVER: cartoon, anime, 3D render look, plastic skin, mannequin. "
+),
+"primary": (
+"Photorealistic documentary photograph. Real human with natural skin texture and features. "
+"ARRI Alexa Mini, 35-85mm Zeiss Master Prime, shallow depth of field. "
+"Natural single-source lighting -- practical lights, window light, overhead fluorescent. "
+"Muted color palette, slight blue shadows, warm highlights. "
+"Mood: intimate, observational, journalistic. "
+),
+"secondary": (
+"Clean photographic infographic style. "
+"Shot from above on dark surface -- objects arranged for explanation. "
+"Soft even lighting, minimal shadows. "
+"Educational, clear, premium documentary B-roll aesthetic. "
+),
+"char_base": (
+"Photorealistic portrait photograph. Real human with natural skin, hair, and facial features. "
+"ARRI Alexa Mini, 85mm lens, f/2.0, shallow depth of field. "
+"Natural studio lighting -- soft key light, subtle fill, dark background. "
+"Muted documentary color grade. No cartoon, no 3D render look. "
+),
+"grade": {"desat": 0.08, "teal_r": -5, "teal_g": 3, "teal_b": 8, "warm_r": 6, "warm_g": 2, "warm_b": -4, "contrast": 1.05, "vignette": 0.20, "grain": 4},
+},
+"Anime Documentary": {
+"world_anchor": (
+"PERSISTENT WORLD RULES: "
+"Japanese anime art style. 2D hand-drawn aesthetic with cel shading. "
+"Characters have expressive anime faces -- large eyes, detailed hair, emotional expressions. "
+"Backgrounds are detailed painted environments. "
+"16:9 widescreen. Studio Bones / MAPPA quality animation frames. "
+"NEVER: 3D render, photorealistic, clay, pixel art, western cartoon. "
+),
+"primary": (
+"Anime key frame illustration. Japanese animation studio quality. "
+"Dramatic anime cinematography -- dynamic angles, speed lines where appropriate. "
+"Rich painted backgrounds with atmospheric depth. "
+"Cel-shaded characters with detailed clothing and expressive body language. "
+"Dramatic anime lighting -- rim lights, color-coded shadows, lens flares. "
+"Mood: intense, cinematic, emotionally charged. "
+),
+"secondary": (
+"Anime explainer style. Clean chibi or simplified character proportions. "
+"Whiteboard or chalkboard aesthetic with hand-drawn diagrams. "
+"Soft pastel colors, clear visual hierarchy. "
+"Educational anime aesthetic -- think Cells at Work or Dr. Stone explanation scenes. "
+),
+"char_base": (
+"Anime character design sheet. Japanese animation studio quality. "
+"Full body front view and 3/4 view side by side. "
+"Detailed anime face -- distinctive eye color and shape, unique hairstyle. "
+"Era-appropriate costume with fabric detail and accessories. "
+"Clean lines, cel shading, neutral background. "
+),
+"grade": {"desat": 0.0, "teal_r": 0, "teal_g": 0, "teal_b": 0, "warm_r": 0, "warm_g": 0, "warm_b": 0, "contrast": 1.10, "vignette": 0.10, "grain": 0},
+},
+"Comic Book / Graphic Novel": {
+"world_anchor": (
+"PERSISTENT WORLD RULES: "
+"Western comic book art style. Bold ink lines, halftone dot shading. "
+"Characters have stylized but realistic proportions -- not chibi, not hyper-real. "
+"Strong blacks, limited color palette with flat colors and dramatic shadows. "
+"16:9 widescreen panel composition. DC/Marvel graphic novel quality. "
+"NEVER: anime, photorealistic, 3D render, watercolor, pixel art. "
+),
+"primary": (
+"Comic book panel illustration. Bold ink outlines, halftone dot shading. "
+"Dramatic noir-influenced composition -- deep shadows, stark contrasts. "
+"Limited color palette -- 4-5 colors per scene maximum. "
+"Dynamic poses and dramatic camera angles. "
+"Style reference: Sean Phillips, Alex Maleev, David Mazzucchelli. "
+"Mood: gritty, noir, graphic. "
+),
+"secondary": (
+"Comic book infographic panel. Blueprint aesthetic with technical cross-section views. "
+"White lines on dark blue background. Callout labels and arrows. "
+"Clean technical illustration meets comic book aesthetic. "
+),
+"char_base": (
+"Comic book character design. Bold ink outlines, flat color fills. "
+"Front view and 3/4 view side by side. "
+"Stylized but anatomically correct proportions. "
+"Distinctive silhouette and costume design. Strong shadow shapes. "
+"Halftone shading. Neutral background. Graphic novel quality. "
+),
+"grade": {"desat": 0.05, "teal_r": -8, "teal_g": 0, "teal_b": 10, "warm_r": 8, "warm_g": 2, "warm_b": -6, "contrast": 1.15, "vignette": 0.15, "grain": 3},
+},
+"Cyberpunk Neon Noir": {
+"world_anchor": (
+"PERSISTENT WORLD RULES: "
+"Cyberpunk neon noir aesthetic. Rain-soaked futuristic city. "
+"Characters have augmented cybernetic features mixed with streetwear. "
+"Dominant colors: electric blue, hot pink, toxic green neon against dark backgrounds. "
+"Holographic UI elements floating in environment. "
+"16:9 widescreen. Unreal Engine 5 quality. "
+"NEVER: daylight, cartoon, clean/sterile, natural environments. "
+),
+"primary": (
+"Cyberpunk cinematic scene. Rain-soaked streets, neon reflections on wet asphalt. "
+"Volumetric fog and atmospheric haze. Holographic advertisements in background. "
+"Cinematic 35mm anamorphic lens, extreme depth. "
+"Dominant neon blue and pink lighting with deep shadows. "
+"Blade Runner meets Ghost in the Shell meets Akira aesthetic. "
+"Mood: dystopian, noir, electric. "
+),
+"secondary": (
+"Cyberpunk holographic UI explainer. Floating translucent data visualizations. "
+"Wireframe 3D models with neon edge lighting on dark void background. "
+"Sci-fi tech aesthetic -- think Minority Report UI or Iron Man HUD. "
+),
+"char_base": (
+"Cyberpunk character design. Neon-lit portrait against dark rain-soaked backdrop. "
+"Front view and 3/4 view side by side. "
+"Streetwear mixed with cybernetic augmentations. "
+"Neon rim lighting, wet surface reflections. "
+"Detailed face with cyber-enhancements. Blade Runner 2049 aesthetic. "
+),
+"grade": {"desat": 0.0, "teal_r": -15, "teal_g": 5, "teal_b": 20, "warm_r": 15, "warm_g": -5, "warm_b": 10, "contrast": 1.12, "vignette": 0.30, "grain": 5},
+},
+"Vintage Film (70s Grain)": {
+"world_anchor": (
+"PERSISTENT WORLD RULES: "
+"1970s film photography aesthetic. Shot on Kodak Ektachrome 64T film stock. "
+"Warm amber color cast, heavy film grain, slight lens softness. "
+"Natural available light -- practicals, tungsten, daylight through windows. "
+"Vintage clothing and environments accurate to the 1970s. "
+"16:9 widescreen. Real photography, not illustration. "
+"NEVER: digital look, sharp/clinical, modern objects, neon, anime. "
+),
+"primary": (
+"1970s documentary photograph on Kodak film stock. Heavy visible film grain. "
+"Warm amber and brown tones with faded blacks. Slight lens softness at edges. "
+"Available light only -- practical lamps, sunlight, overhead fluorescent. "
+"Period-accurate environments and wardrobe. "
+"Style reference: Alan Pakula, Sidney Lumet cinematography. "
+"Mood: paranoid, gritty, authentic. "
+),
+"secondary": (
+"1970s educational filmstrip aesthetic. Vintage overhead projector look. "
+"Faded colors, rounded corners, light leak effects. "
+"Simple diagrams with hand-drawn labels on yellowed paper. "
+),
+"char_base": (
+"1970s portrait photograph on Kodak film stock. Heavy grain, warm amber tones. "
+"Front view and 3/4 view side by side. "
+"Natural available light, shallow depth of field. "
+"Period-accurate clothing and hairstyle. "
+"Slight lens softness. Documentary portrait style. "
+),
+"grade": {"desat": 0.10, "teal_r": 5, "teal_g": -3, "teal_b": -10, "warm_r": 18, "warm_g": 8, "warm_b": -5, "contrast": 1.03, "vignette": 0.35, "grain": 12},
+},
+"Oil Painting / Classical": {
+"world_anchor": (
+"PERSISTENT WORLD RULES: "
+"Classical oil painting on canvas. Visible brushstrokes, rich impasto texture. "
+"Rembrandt and Caravaggio chiaroscuro lighting -- dramatic single source. "
+"Deep rich colors -- burnt sienna, raw umber, cadmium yellow, ultramarine blue. "
+"Gallery-quality fine art, museum-worthy composition. "
+"16:9 widescreen. Traditional oil painting medium. "
+"NEVER: digital art, photorealistic, cartoon, anime, flat colors. "
+),
+"primary": (
+"Classical oil painting on canvas. Rich impasto brushstrokes visible in texture. "
+"Chiaroscuro lighting -- single dramatic light source, deep shadow. "
+"Old master composition and color palette -- warm earth tones, deep blues. "
+"Figures have weight and presence, draped in rich fabrics. "
+"Style reference: Rembrandt, Caravaggio, Vermeer. "
+"Mood: dramatic, timeless, gravitas. "
+),
+"secondary": (
+"Technical illustration in old master drawing style. "
+"Sepia ink on parchment paper. Leonardo da Vinci notebook aesthetic. "
+"Cross-section diagrams with handwritten labels. Aged paper texture. "
+),
+"char_base": (
+"Classical oil portrait painting. Rich brushwork, canvas texture visible. "
+"Front view and 3/4 view side by side. "
+"Chiaroscuro lighting -- dramatic single source. "
+"Deep rich earth tone palette. Gallery-worthy composition. "
+"Old master portrait style -- Rembrandt, Caravaggio influence. "
+),
+"grade": {"desat": 0.05, "teal_r": 0, "teal_g": -5, "teal_b": -8, "warm_r": 15, "warm_g": 8, "warm_b": -3, "contrast": 1.06, "vignette": 0.30, "grain": 2},
+},
+"Watercolor / Storybook": {
+"world_anchor": (
+"PERSISTENT WORLD RULES: "
+"Delicate watercolor painting on textured paper. Visible paper grain and water blooms. "
+"Soft diffused edges, subtle color bleeding between shapes. "
+"Pastel and muted color palette -- soft blues, warm pinks, sage greens, cream. "
+"Gentle and contemplative mood. Children's book illustration quality. "
+"16:9 widescreen. Traditional watercolor medium. "
+"NEVER: photorealistic, harsh shadows, neon colors, anime, digital look. "
+),
+"primary": (
+"Watercolor illustration on textured cold-pressed paper. "
+"Visible paper grain, soft wet-on-wet color bleeds, delicate dry brush details. "
+"Soft diffused natural lighting -- no harsh shadows. "
+"Muted pastel palette with occasional deeper accent colors. "
+"Style reference: Shaun Tan, Jon Klassen, Beatrix Potter. "
+"Mood: gentle, contemplative, melancholic beauty. "
+),
+"secondary": (
+"Watercolor diagram on cream paper. Soft hand-painted labels and arrows. "
+"Botanical illustration precision meets watercolor softness. "
+"Educational diagram with artistic beauty. Aged paper texture. "
+),
+"char_base": (
+"Watercolor character illustration on textured paper. "
+"Front view and 3/4 view side by side. "
+"Soft edges, visible paper grain, subtle color bleeding. "
+"Gentle muted palette. Delicate brushwork. "
+"Children's book illustration quality. Cream paper background. "
+),
+"grade": {"desat": 0.0, "teal_r": 0, "teal_g": 2, "teal_b": 5, "warm_r": 5, "warm_g": 3, "warm_b": 0, "contrast": 1.02, "vignette": 0.10, "grain": 0},
+},
+"Clay / Stop Motion": {
+"world_anchor": (
+"PERSISTENT WORLD RULES: "
+"Claymation stop-motion animation style. Characters and environments made of clay and plasticine. "
+"Visible fingerprints and tool marks on surfaces. Miniature practical sets. "
+"Warm studio lighting with soft shadows. Slightly textured, handmade quality. "
+"16:9 widescreen. Laika Studios / Aardman quality. "
+"NEVER: photorealistic, anime, flat 2D, digital smooth surfaces. "
+),
+"primary": (
+"Claymation stop-motion scene. Characters sculpted from plasticine clay. "
+"Miniature practical set with handcrafted props and environments. "
+"Visible fingerprints and sculpting tool marks on all surfaces. "
+"Warm studio lighting, soft shadows, shallow depth of field from macro lens. "
+"Tilt-shift miniature effect. Coraline / Kubo quality. "
+"Mood: tactile, handcrafted, charming but slightly eerie. "
+),
+"secondary": (
+"Claymation diorama cutaway. Miniature cross-section model on turntable. "
+"Clay and wire armature visible in educational explainer style. "
+"Warm studio lighting, clean presentation. "
+),
+"char_base": (
+"Claymation character design. Sculpted plasticine clay figure. "
+"Front view and 3/4 view side by side on miniature turntable. "
+"Visible fingerprints, handmade texture. Wire armature poseable joints. "
+"Warm studio lighting. Macro lens shallow depth of field. "
+"Laika Studios quality -- Coraline, Kubo aesthetic. "
+),
+"grade": {"desat": 0.0, "teal_r": 0, "teal_g": 2, "teal_b": 0, "warm_r": 10, "warm_g": 6, "warm_b": 0, "contrast": 1.04, "vignette": 0.15, "grain": 2},
+},
 }
 
-# Active preset — changed by UI dropdown
+# Active preset -- changed by UI dropdown
 active_preset = STYLE_PRESETS["Noir Documentary (Faceless 3D)"]
+
 
 def get_world_anchor():
     return active_preset["world_anchor"]
 
+
 def get_primary_style():
     return active_preset["primary"]
+
 
 def get_secondary_style():
     return active_preset["secondary"]
 
+
 def get_char_base():
     return active_preset["char_base"]
+
 
 def get_grade_params():
     return active_preset["grade"]
 
 
-
 # ═══════════════════════════════════════════════════════════
 # CHARACTER + ENVIRONMENT DEFINITIONS
+# Empty by default -- populated dynamically from JSX on upload
 # ═══════════════════════════════════════════════════════════
-CHARACTERS = {
-    "leo": {
-        "name": "Leonardo Notarbartolo",
-        "alias": [
-            "Notarbartolo", "Leonardo", "Italian man",
-            "charcoal suit", "tailored charcoal suit", "charcoal tailored suit",
-            "slicked-back hair", "dark slicked-back hair",
-            "gold watch", "thin gold watch",
-            "white dress shirt", "open-collar white",
-            "navy three-piece", "tailored dark navy",
-        ],
-        "desc": "Mid-50s, medium build, dark slicked-back hair, tailored charcoal suit, open-collar white dress shirt, thin gold watch on left wrist, polished black shoes",
-        "views": {
-            "front": "CHARACTER REFERENCE — FRONT VIEW. Mid-50s man, medium build, dark slicked-back hair, tailored charcoal suit, open-collar white dress shirt, thin gold watch on left wrist, polished black shoes. Light-toned smooth mannequin skin. Confident, one hand in pocket.",
-            "three_quarter": "CHARACTER REFERENCE — 3/4 VIEW. Mid-50s man, dark slicked-back hair, charcoal suit, open-collar white shirt, gold watch. Light-toned smooth mannequin skin. Looking to the side.",
-            "action": "CHARACTER REFERENCE — ACTION POSE. Man in charcoal suit and white dress shirt, slicked-back hair. Leaning over desk examining documents, gold watch visible. Light-toned smooth mannequin skin.",
-        },
-    },
-    "monster": {
-        "name": "The Monster",
-        "alias": [
-            "Monster", "Finotto", "Ferdinando",
-            "massive barrel-chested", "barrel-chested",
-            "black leather jacket", "dark henley",
-            "enormous hands", "heavy work boots",
-            "thick silver ring",
-            # backward compat
-            "tall muscular", "dark work coveralls", "heavy boots", "dark coveralls",
-        ],
-        "desc": "Late 40s, massive barrel-chested build, broad shoulders, black leather jacket over dark henley shirt, heavy work boots, thick silver ring on right hand",
-        "views": {
-            "front": "CHARACTER REFERENCE — FRONT VIEW. Late 40s massive barrel-chested man, broad shoulders, black leather jacket over dark henley shirt, heavy work boots, thick silver ring on right hand. Light-toned smooth mannequin skin. Arms crossed, imposing stance.",
-            "three_quarter": "CHARACTER REFERENCE — 3/4 VIEW. Massive barrel-chested man in black leather jacket, dark henley, heavy boots. Light-toned smooth mannequin skin. Powerful build visible.",
-            "action": "CHARACTER REFERENCE — ACTION POSE. Massive man in black leather jacket, enormous hands working on a lock mechanism with tools. Heavy work boots. Light-toned smooth mannequin skin.",
-        },
-    },
-    "genius": {
-        "name": "The Genius",
-        "alias": [
-            "Genius", "D'Onorio", "Elio",
-            "dark navy technical jacket", "technical jacket",
-            "thin-framed glasses", "thin precise hands",
-            "rubber-soled shoes", "circuit board",
-            # backward compat
-            "wire-rimmed glasses", "wire-frame glasses",
-            "olive utility vest", "olive vest", "tactical vest",
-        ],
-        "desc": "Early 50s, lean and wiry, precise movements, dark navy technical jacket, thin-framed glasses, black rubber-soled shoes, digital watch",
-        "views": {
-            "front": "CHARACTER REFERENCE — FRONT VIEW. Early 50s lean wiry man, dark navy technical jacket, thin-framed glasses, black rubber-soled shoes, digital watch. Light-toned smooth mannequin skin. Precise technical posture.",
-            "three_quarter": "CHARACTER REFERENCE — 3/4 VIEW. Lean wiry man with thin-framed glasses, dark navy technical jacket, digital watch. Light-toned smooth mannequin skin. Examining something with precision.",
-            "action": "CHARACTER REFERENCE — ACTION POSE. Lean man in dark navy technical jacket, thin-framed glasses, working on electronic circuit board. Digital watch visible. Light-toned smooth mannequin skin.",
-        },
-    },
-    "speedy": {
-        "name": "Speedy",
-        "alias": [
-            "Speedy", "Tavano", "Pietro",
-            "wrinkled olive field jacket", "olive field jacket", "olive jacket",
-            "thin nervous man", "nervous hands", "thin and fidgety",
-            "cheap digital watch", "scuffed brown boots",
-            # backward compat
-            "lookout", "thin wiry man", "dark canvas jacket", "black wool beanie",
-        ],
-        "desc": "Late 40s, thin and fidgety, nervous energy, wrinkled olive field jacket, dark jeans, scuffed brown boots, cheap digital watch",
-        "views": {
-            "front": "CHARACTER REFERENCE — FRONT VIEW. Late 40s thin fidgety man in wrinkled olive field jacket, dark jeans, scuffed brown boots, cheap digital watch. Light-toned smooth mannequin skin. Nervous posture, shoulders hunched.",
-            "three_quarter": "CHARACTER REFERENCE — 3/4 VIEW. Thin man in olive field jacket, dark jeans, brown boots. Light-toned smooth mannequin skin. Looking over shoulder nervously.",
-            "action": "CHARACTER REFERENCE — ACTION POSE. Thin nervous man in olive field jacket sitting in car, hands gripping steering wheel tensely. Cheap digital watch. Light-toned smooth mannequin skin.",
-        },
-    },
-    "king": {
-        "name": "The King of Keys",
-        "alias": [
-            "King of Keys",
-            "plain black coat", "leather gloves", "leather-gloved hands",
-            "dark trousers", "nondescript",
-            "key blank", "brass key",
-            # backward compat
-            "older man", "white hair", "wool sweater", "wool coat",
-        ],
-        "desc": "Age unknown, medium build, completely nondescript, plain black coat, dark trousers, leather gloves, no distinguishing accessories, face always in shadow",
-        "views": {
-            "front": "CHARACTER REFERENCE — FRONT VIEW. Nondescript medium-build man in plain black coat, dark trousers, leather gloves. Light-toned smooth mannequin skin. Face partly in shadow. No distinguishing features.",
-            "three_quarter": "CHARACTER REFERENCE — 3/4 VIEW. Medium-build man in plain black coat, leather gloves. Light-toned smooth mannequin skin. Turned away, face in shadow. Examining key.",
-            "action": "CHARACTER REFERENCE — ACTION POSE. Man in plain black coat, leather gloves filing a brass key blank on a vise. Face entirely in shadow. Light-toned smooth mannequin skin.",
-        },
-    },
-    "guard": {
-        "name": "Security Guard",
-        "alias": [
-            "security guard", "guard",
-            "security uniform", "navy security uniform", "navy blue security",
-            "shoulder patches", "clip-on ID badge", "utility belt",
-        ],
-        "desc": "Middle-aged, average build, navy blue security uniform with shoulder patches, black utility belt, clip-on ID badge, rubber-soled boots",
-        "views": {
-            "front": "CHARACTER REFERENCE — FRONT VIEW. Middle-aged average-build man in navy blue security uniform with shoulder patches, black utility belt, clip-on ID badge, rubber-soled boots. Light-toned smooth mannequin skin. Routine posture.",
-            "three_quarter": "CHARACTER REFERENCE — 3/4 VIEW. Man in navy security uniform, utility belt, ID badge. Light-toned smooth mannequin skin. Walking posture.",
-            "action": "CHARACTER REFERENCE — ACTION POSE. Man in navy security uniform walking down corridor, keys on belt. Routine movement. Light-toned smooth mannequin skin.",
-        },
-    },
-    "vancamp": {
-        "name": "August Van Camp",
-        "alias": [
-            "Van Camp", "August",
-            "brown corduroy jacket", "faded brown corduroy", "corduroy jacket",
-            "flat cap", "wellington boots", "muddy wellington",
-            "slight build", "weathered",
-            # backward compat
-            "retired grocer", "red plaid flannel", "plaid flannel", "stocky",
-        ],
-        "desc": "59 years old, slight build, weathered features, faded brown corduroy jacket, flat cap, dark wool trousers, muddy wellington boots",
-        "views": {
-            "front": "CHARACTER REFERENCE — FRONT VIEW. 59-year-old man, slight build, faded brown corduroy jacket, flat cap, dark wool trousers, muddy wellington boots. Light-toned smooth mannequin skin. Hunched slightly, observant.",
-            "three_quarter": "CHARACTER REFERENCE — 3/4 VIEW. Slight man in brown corduroy jacket, flat cap, wellington boots. Light-toned smooth mannequin skin. Walking slowly, looking at ground.",
-            "action": "CHARACTER REFERENCE — ACTION POSE. Slight man in brown corduroy jacket and flat cap crouching on muddy path examining debris. Wellington boots. Light-toned smooth mannequin skin.",
-        },
-    },
-    "peys": {
-        "name": "Detective Peys",
-        "alias": ["Peys", "detective", "Detective Peys", "Patrick Peys", "dark wool overcoat", "gray scarf"],
-        "desc": "Middle-aged man, sturdy build, dark gray wool overcoat, gray scarf, short-cropped gray hair, detective badge on belt",
-        "views": {
-            "front": "CHARACTER REFERENCE — FRONT VIEW. Middle-aged man in dark wool overcoat and gray scarf, short-cropped gray hair, sturdy build. Light-toned smooth mannequin skin. Standing straight, hands at sides.",
-            "three_quarter": "CHARACTER REFERENCE — 3/4 VIEW. Middle-aged man in dark wool overcoat and gray scarf, short-cropped gray hair. Light-toned smooth mannequin skin. Slight turn to left.",
-            "action": "CHARACTER REFERENCE — ACTION POSE. Middle-aged man in dark wool overcoat and gray scarf. Walking through dark corridor, hand reaching for door. Light-toned smooth mannequin skin.",
-        },
-    },
-}
+
+CHARACTERS = {}
+ENVIRONMENTS = {}
+MASTER_SHOT_DETAILS = {}
+
 
 def get_char_view_prompt(cid, view):
     """Build full character ref prompt: active preset char_base + character-specific detail."""
@@ -500,8 +359,9 @@ def get_char_view_prompt(cid, view):
         return get_char_base() + chars[cid]["views"][view]
     return get_char_base()
 
+
 def get_char_sheet_prompt(cid):
-    """Build single character reference sheet prompt — front view, back view, close-up on one image."""
+    """Build single character reference sheet prompt -- front view, back view, close-up on one image."""
     chars = get_active_characters()
     if cid not in chars:
         return get_char_base()
@@ -519,69 +379,32 @@ def get_char_sheet_prompt(cid):
         f"16:9 widescreen format. "
     )
 
-ENVIRONMENTS = {
-    "vault_interior": {"name": "Vault Interior", "keywords": ["vault interior", "vault floor", "safe deposit box", "boxes", "vault room", "inside vault", "vault wall"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Interior of massive underground bank vault. Rows of metal safe deposit boxes. Single dramatic overhead spotlight. Polished concrete floor. Industrial. Wide 16:9. No people."},
-    "vault_door": {"name": "Vault Door", "keywords": ["vault door", "massive circular", "heavy metal door", "combination lock", "combination dial", "steel vault door", "colossal steel"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Massive circular steel vault door in concrete wall. Heavy metal frame. Combination dial. Single overhead light. Underground. Wide 16:9. No people."},
-    "corridor": {"name": "Corridor", "keywords": ["corridor", "hallway", "stairwell", "stairs", "concrete corridor", "vault level"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Dimly lit concrete corridor. Fluorescent lights, harsh shadows. Metal railing. Industrial pipes. Emergency exit signs. Wide 16:9. No people."},
-    "office": {"name": "Office", "keywords": ["office", "office desk", "conference", "meeting", "leather briefcase", "gem loupe"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Small rented office in old European building. Desk, chair, window with overcast daylight. Warm desk lamp. Wide 16:9. No people."},
-    "exterior": {"name": "Building Exterior", "keywords": ["building exterior", "diamond centre", "facade", "diamond center", "commercial building", "stone and glass building", "bollards"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Imposing stone European building exterior. Grand old architecture. Security bollards. Overcast sky. Dramatic low angle. Wide 16:9. No people."},
-    "diamond_district": {"name": "Diamond District", "keywords": ["diamond district", "cobblestone", "jewelry shops", "diamond capital", "three-block", "deserted", "shuttered storefronts"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Narrow European diamond district street at night. Cobblestone road, jewelry shops with golden window displays, wet pavement. Security cameras. Deserted. Wide 16:9. No people."},
-    "garage": {"name": "Garage", "keywords": ["garage", "parking", "underground garage", "garage door", "garage exit"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Underground parking garage. Concrete ramp into darkness. Yellow sodium lights. Metal garage door. Nighttime. Wide 16:9. No people."},
-    "apartment": {"name": "Apartment", "keywords": ["apartment", "divide", "split the take"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Dark European apartment. Wooden table under warm desk lamp. Sparse, functional. Curtains drawn. Wide 16:9. No people."},
-    "warehouse": {"name": "Warehouse", "keywords": ["warehouse", "replica vault", "practice", "construction lights"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Large abandoned warehouse interior. Crude replica vault constructed from steel plates and concrete blocks. Construction lights on stands. Dark cavernous space. Industrial. Wide 16:9. No people."},
-    "workshop": {"name": "Workshop", "keywords": ["workshop", "workbench", "sparks", "grinding", "tools", "precision tools", "filing"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Dimly lit mechanic's workshop. Heavy workbench with scattered tools. Single overhead bulb. Metalworking vise. Industrial grit. Wide 16:9. No people."},
-    "vancamp_property": {"name": "Van Camp's Property", "keywords": ["van camp", "countryside", "property", "garden", "rural", "porch", "forest", "dirt road", "dirt path", "wooded", "muddy path", "bare trees", "bare winter trees"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Modest Belgian countryside near E19 motorway at dawn. Bare winter trees, muddy path, dead leaves. Wooded area adjacent to highway. Quiet rural morning. Wide 16:9. No people."},
-    "highway": {"name": "Highway", "keywords": ["highway", "motorway", "E19", "empty highway", "open road"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. European highway at night. Empty road into darkness. Forest both sides. Wet asphalt. Tail lights in distance. Wide 16:9. No people."},
-    "crime_scene": {"name": "Crime Scene", "keywords": ["police tape", "evidence markers", "forensic", "cordoned", "woodland clearing"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Muddy woodland clearing cordoned with police tape. Evidence markers on ground. Overcast sky. Forensic atmosphere. Wide 16:9. No people."},
-    "prison": {"name": "Prison / Interview Room", "keywords": ["prison", "prison clothing", "interview room", "metal table", "stark", "barred window"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Stark prison interview room. Metal table and chairs. Single overhead light. Concrete walls. Small barred window. Institutional. Wide 16:9. No people."},
-    "factory_district": {"name": "Factory District", "keywords": ["factory", "industrial cityscape", "smokestacks", "fiat", "car factories", "chain-link"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Industrial cityscape at dusk. Massive factory buildings with smokestacks. Chain-link fencing. Puddles reflecting factory lights. Gritty. Wide 16:9. No people."},
-    "italian_rural": {"name": "Italian Rural", "keywords": ["rural Italian", "Italian property", "wood pellet", "rolling hills", "modest rural"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Modest rural Italian property at dusk. Small warehouse building. Rolling hills background. Warm amber light from single window. Peaceful but melancholy. Wide 16:9. No people."},
-    "courtroom": {"name": "Courtroom", "keywords": ["courtroom", "court", "trial", "judge", "verdict", "sentencing", "testimony"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Belgian courtroom interior. Wooden judge bench elevated, witness stand, gallery seating. Institutional lighting, wood paneling. Formal, austere. Wide 16:9. No people."},
-    "police_station": {"name": "Police Station", "keywords": ["police station", "interrogation", "detective office", "diamond detective"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Belgian police station interior. Interrogation room with metal table and chairs. One-way mirror. Harsh fluorescent lighting. Institutional, cold. Wide 16:9. No people."},
-    "aerial_city": {"name": "Antwerp Aerial", "keywords": ["aerial", "skyline", "overview", "bird", "Gothic architecture", "rooftops"],
-        "prompt_detail": "ENVIRONMENT REFERENCE — EMPTY. Dramatic aerial view of Antwerp city at dusk. Diamond district visible. Gothic architecture. Overcast sky, golden hour light breaking through clouds. Cinematic establishing shot. Wide 16:9. No people."},
-}
 
 def get_env_prompt(eid):
-    """Build environment prompt using active preset."""
-    return get_world_anchor() + get_primary_style() + ENVIRONMENTS[eid]["prompt_detail"]
+    """Build environment prompt using active preset + dynamic environment data."""
+    envs = get_active_environments()
+    if eid in envs:
+        return get_world_anchor() + get_primary_style() + envs[eid].get("prompt_detail", envs[eid].get("prompt", ""))
+    return get_world_anchor() + get_primary_style()
 
 
 # ═══════════════════════════════════════════════════════════
-# PARSER
+# PARSER -- JSX storyboard to panel list
 # ═══════════════════════════════════════════════════════════
+
 def parse_storyboard(text):
-    """Parse JSX storyboard → list of panel dicts.
+    """Parse JSX storyboard -> list of panel dicts.
     Supports:
-      - v1 flat: const P = [{ id, t, g, f, s, vo, ... }]
-      - v2 nested: const SECTIONS = [{ id, name, panels: [{ id, type, gemini:{}, kling:{}, ... }] }]
+    - v1 flat: const P = [{ id, t, g, f, s, vo, ... }]
+    - v2 nested: const SECTIONS = [{ id, name, panels: [{ id, type, gemini:{}, kling:{}, ... }] }]
     Returns normalized flat list with consistent field names.
     """
-
-    # ── TRY v2 NESTED FORMAT FIRST ──
+    # Try v2 nested format first
     sec_match = re.search(r'const\s+SECTIONS\s*=\s*\[', text)
     if sec_match:
         return _parse_v2(text)
 
-    # ── FALLBACK: v1 FLAT FORMAT ──
+    # Fallback: v1 flat format
     match = re.search(r'const\s+(?:P|panels)\s*=\s*\[(.*?)\];', text, re.DOTALL)
     if not match:
         return []
@@ -599,30 +422,25 @@ def parse_storyboard(text):
 
 
 def _parse_v2(text):
-    """Parse v2 nested SECTIONS format. Handles both id/name and title formats."""
+    """Parse v2 nested SECTIONS format."""
     panels = []
-    
-    # Find the SECTIONS array start
     sec_start = re.search(r'const\s+SECTIONS\s*=\s*\[', text)
     if not sec_start:
         return panels
-    
+
     sections_text = text[sec_start.end():]
-    
-    # Find end of SECTIONS array
     depth = 1
     pos = 0
     while pos < len(sections_text) and depth > 0:
-        if sections_text[pos] == '[': depth += 1
-        elif sections_text[pos] == ']': depth -= 1
+        if sections_text[pos] == '[':
+            depth += 1
+        elif sections_text[pos] == ']':
+            depth -= 1
         pos += 1
     sections_text = sections_text[:pos-1]
-    
+
     section_num = 0
-    
-    # Find each "panels: [" — only real sections have this
     for pm in re.finditer(r'panels:\s*\[', sections_text):
-        # Walk backwards to find opening { of this section object
         obj_start = pm.start()
         brace_depth = 0
         for i in range(obj_start, -1, -1):
@@ -633,45 +451,40 @@ def _parse_v2(text):
                 brace_depth -= 1
             elif sections_text[i] == '}':
                 brace_depth += 1
-        
+
         header_text = sections_text[obj_start:pm.start()]
-        
         section_num += 1
         sec_name = f"Section {section_num}"
         sec_id = f"S{section_num}"
-        
-        # Try id: "S..." + name: "..." (old format)
+
         id_m = re.search(r'id:\s*"(S\d+)"', header_text)
         name_m = re.search(r'name:\s*"([^"]+)"', header_text)
-        
         if id_m and name_m:
             sec_id = id_m.group(1)
             sec_name = name_m.group(1)
         else:
-            # Try title: "..." (new format)
             title_m = re.search(r'title:\s*"([^"]+)"', header_text)
             if title_m:
                 sec_name = title_m.group(1)
-        
-        # Extract panels array by bracket matching
+
         panels_start = pm.end()
         depth = 1
         pos = panels_start
         while pos < len(sections_text) and depth > 0:
-            if sections_text[pos] == '[': depth += 1
-            elif sections_text[pos] == ']': depth -= 1
+            if sections_text[pos] == '[':
+                depth += 1
+            elif sections_text[pos] == ']':
+                depth -= 1
             pos += 1
         panels_text_inner = sections_text[panels_start:pos-1]
-        
-        # Parse individual panel objects
+
         panel_objects = _extract_objects(panels_text_inner)
         for ptext in panel_objects:
             p = _parse_panel_object(ptext, sec_id, sec_name)
             if p and p.get('id'):
                 panels.append(p)
-    
-    return panels
 
+    return panels
 
 
 def _extract_objects(text):
@@ -696,76 +509,73 @@ def _parse_panel_object(ptext, sec_id, sec_name):
     """Parse a single panel object string into a normalized dict."""
     p = {'section': sec_name, 'section_id': sec_id}
 
-    # ID
     m = re.search(r'id:\s*"([^"]+)"', ptext)
-    if m: p['id'] = m.group(1)
+    if m:
+        p['id'] = m.group(1)
 
-    # Type (noir/fern/gfx)
     m = re.search(r'type:\s*"([^"]+)"', ptext)
-    if m: p['type'] = m.group(1)
+    if m:
+        p['type'] = m.group(1)
 
-    # Transition
     m = re.search(r'transition:\s*"([^"]+)"', ptext)
-    if m: p['tr'] = m.group(1)
+    if m:
+        p['tr'] = m.group(1)
 
-    # Music
     m = re.search(r'music:\s*"([^"]+)"', ptext)
-    if m: p['m'] = m.group(1)
+    if m:
+        p['m'] = m.group(1)
 
-    # Voiceover
     m = re.search(r'vo:\s*"((?:[^"\\]|\\.)*)"', ptext)
-    if m: p['vo'] = m.group(1)
+    if m:
+        p['vo'] = m.group(1)
 
-    # Gemini block: { file: "...", prompt: "..." }
     gm = re.search(r'gemini:\s*\{([^}]+)\}', ptext)
     if gm:
         gtext = gm.group(1)
         fm = re.search(r'file:\s*"([^"]+)"', gtext)
-        pm = re.search(r'prompt:\s*"((?:[^"\\]|\\.)*)"', gtext)
-        if fm: p['f'] = fm.group(1).replace('.png', '')  # strip extension for consistency
-        if pm: p['g'] = pm.group(1)
+        pm2 = re.search(r'prompt:\s*"((?:[^"\\]|\\.)*)"', gtext)
+        if fm:
+            p['f'] = fm.group(1).replace('.png', '')
+        if pm2:
+            p['g'] = pm2.group(1)
 
-    # Kling block: { file: "...", note: "..." }
     km = re.search(r'kling:\s*\{([^}]+)\}', ptext)
     if km:
         ktext = km.group(1)
         fm = re.search(r'file:\s*"([^"]+)"', ktext)
         nm = re.search(r'note:\s*"((?:[^"\\]|\\.)*)"', ktext)
-        if fm: p['kling_file'] = fm.group(1)
-        if nm: p['k'] = nm.group(1)
+        if fm:
+            p['kling_file'] = fm.group(1)
+        if nm:
+            p['k'] = nm.group(1)
 
-    # Overlay block: { main: "...", style: "..." }
     om = re.search(r'overlay:\s*\{([^}]+)\}', ptext)
     if om:
         otext = om.group(1)
         mm = re.search(r'main:\s*"((?:[^"\\]|\\.)*)"', otext)
         sm = re.search(r'style:\s*"((?:[^"\\]|\\.)*)"', otext)
-        if mm: p['overlay_main'] = mm.group(1)
-        if sm: p['overlay_style'] = sm.group(1)
+        if mm:
+            p['overlay_main'] = mm.group(1)
+        if sm:
+            p['overlay_style'] = sm.group(1)
 
-    # Hera prompts (GFX): array of strings
     hm = re.search(r'hera:\s*\[(.*?)\]', ptext, re.DOTALL)
     if hm:
         hera_text = hm.group(1)
         p['hera'] = re.findall(r'"((?:[^"\\]|\\.)*)"', hera_text)
 
-    # Style context (GFX)
-    # Must match style: "..." but NOT overlay.style
-    # Find style at panel level (not inside overlay block)
     sm = re.search(r'(?<!\w)style:\s*"((?:[^"\\]|\\.)*)"', ptext)
-    if sm and 'hera' in p:  # only for GFX panels
+    if sm and 'hera' in p:
         p['hera_style'] = sm.group(1)
 
-    # Cold open detection (S1 = cold open)
     if sec_id == 'S1':
         p['co'] = 1
-
 
     return p
 
 
 def get_asset_type(panel):
-    """Normalize asset type for STYLE selection (noir styling or fern styling)."""
+    """Normalize asset type for STYLE selection."""
     t = panel.get('type', panel.get('t', panel.get('assetType', ''))).lower()
     if t in ('i2v', 'parallax', 'noir') or 'noir' in t:
         return 'noir'
@@ -778,33 +588,40 @@ def get_asset_type(panel):
     return 'unknown'
 
 
-
-
-
-
 def get_image_prompt(panel):
     """Extract the image generation prompt from panel."""
     return panel.get('g', panel.get('geminiPrompt', panel.get('prompt', '')))
 
 
 def get_section(panel):
-    """Extract section name."""
-    return panel.get('section', panel.get('s', panel.get('scene', 'Unknown')))
+    """Get section name from panel."""
+    return panel.get('section', panel.get('section_id', 'Unknown'))
 
 
 # ═══════════════════════════════════════════════════════════
 # AUTO-EXTRACT CHARACTERS FROM STORYBOARD
 # ═══════════════════════════════════════════════════════════
-# Runtime store for storyboard-extracted characters
-_dynamic_characters = {}
 
-# Clothing/appearance keywords that make good aliases
 _CLOTHING_WORDS = {
-    "suit", "jacket", "coat", "shirt", "vest", "hoodie", "coveralls", "uniform",
-    "boots", "shoes", "gloves", "hat", "cap", "glasses", "watch", "ring", "tie",
-    "turtleneck", "henley", "flannel", "corduroy", "trousers", "jeans", "pants",
-    "leather", "wool", "silk", "denim",
+"suit", "jacket", "coat", "shirt", "vest", "hoodie", "coveralls", "uniform",
+"boots", "shoes", "gloves", "hat", "cap", "glasses", "watch", "ring", "tie",
+"turtleneck", "henley", "flannel", "corduroy", "trousers", "jeans", "pants",
+"leather", "wool", "silk", "denim",
+"top", "tank", "blazer", "sweater", "overcoat", "sneakers", "sandals",
+"headlamp", "badge", "holster", "chain", "bracelet", "necklace",
+"khakis", "slacks", "shorts",
 }
+
+_ROLE_WORDS = {
+"police", "officer", "detective", "security", "guard", "agent", "inspector",
+"soldier", "military", "captain", "sergeant", "lieutenant", "chief",
+"banker", "clerk", "employee", "manager", "director", "boss",
+"thief", "burglar", "criminal", "con", "hustler", "dealer",
+"doctor", "nurse", "lawyer", "judge", "priest", "professor",
+"driver", "pilot", "engineer", "mechanic", "digger", "tunneler",
+"financier", "trafficker", "ringleader", "insider",
+}
+
 
 def auto_extract_characters(text):
     """Parse CHARACTERS array from storyboard JSX, generate aliases from descriptions.
@@ -817,8 +634,10 @@ def auto_extract_characters(text):
     depth = 1
     pos = start
     while pos < len(text) and depth > 0:
-        if text[pos] == '[': depth += 1
-        elif text[pos] == ']': depth -= 1
+        if text[pos] == '[':
+            depth += 1
+        elif text[pos] == ']':
+            depth -= 1
         pos += 1
     chars_text = text[start:pos-1]
 
@@ -828,78 +647,78 @@ def auto_extract_characters(text):
         desc_m = re.search(r'desc:\s*"([^"]+)"', obj)
         if not name_m or not desc_m:
             continue
-
         name = name_m.group(1)
         desc = desc_m.group(1)
         cid = _make_char_id(name)
-
         aliases = _extract_aliases(name, desc)
-
-        # Build simple views from desc
         base_desc = desc.split(". Mannequin: ")[-1] if ". Mannequin: " in desc else desc
         views = {
-            "front": f"CHARACTER REFERENCE — FRONT VIEW. {base_desc} Light-toned smooth mannequin skin. Standing straight.",
-            "three_quarter": f"CHARACTER REFERENCE — 3/4 VIEW. {base_desc} Light-toned smooth mannequin skin. Slight turn.",
-            "action": f"CHARACTER REFERENCE — ACTION POSE. {base_desc} Light-toned smooth mannequin skin. In action.",
+            "front": f"CHARACTER REFERENCE -- FRONT VIEW. {base_desc} Light-toned smooth mannequin skin. Standing straight.",
+            "three_quarter": f"CHARACTER REFERENCE -- 3/4 VIEW. {base_desc} Light-toned smooth mannequin skin. Slight turn.",
+            "action": f"CHARACTER REFERENCE -- ACTION POSE. {base_desc} Light-toned smooth mannequin skin. In action.",
         }
-
         extracted[cid] = {
             "name": name,
             "alias": aliases,
             "desc": desc,
             "views": views,
         }
-
     return extracted
 
 
 def _make_char_id(name):
-    """Generate a short character ID from name."""
-    name_lower = name.lower()
-    # Known mappings
-    if "notarbartolo" in name_lower or "leonardo" in name_lower: return "leo"
-    if "monster" in name_lower: return "monster"
-    if "genius" in name_lower: return "genius"
-    if "speedy" in name_lower: return "speedy"
-    if "king of keys" in name_lower: return "king"
-    if "van camp" in name_lower: return "vancamp"
-    if "peys" in name_lower: return "peys"
-    if "guard" in name_lower or "security" in name_lower: return "guard"
-    # Fallback: first word
-    return re.sub(r'[^a-z0-9]', '', name_lower.split()[0])[:8]
+    """Generate a short character ID from name. Project-agnostic."""
+    name_lower = name.lower().strip()
+    skip_words = {"the", "and", "of", "da", "de", "dos", "das", "del", "van", "von", "di"}
+    words = re.sub(r'[^a-z0-9\s]', '', name_lower).split()
+    for w in words:
+        if w not in skip_words and len(w) > 2:
+            return w[:8]
+    return re.sub(r'[^a-z0-9]', '', name_lower)[:8] or "char"
 
 
 def _extract_aliases(name, desc):
     """Generate detection aliases from character name and description."""
     aliases = []
-
-    # Name parts
     parts = re.split(r'[\s\(\)]+', name)
     for p in parts:
         p = p.strip()
         if len(p) > 2 and p.lower() not in {"the", "and"}:
             aliases.append(p)
 
-    # Multi-word name aliases
     if "(" in name:
-        # "The Monster (Ferdinando Finotto)" → "The Monster", "Finotto"
         before = name.split("(")[0].strip()
         inside = name.split("(")[1].rstrip(")")
-        if before: aliases.append(before)
+        if before:
+            aliases.append(before)
         for w in inside.split():
-            if len(w) > 3: aliases.append(w)
+            if len(w) > 3:
+                aliases.append(w)
 
-    # Clothing phrases from desc
-    # Split by commas and periods
-    phrases = re.split(r'[,\.]+', desc)
+    phrases = re.split(r'[,\.\;\-]+', desc)
     for phrase in phrases:
         phrase = phrase.strip().lower()
-        # Check if phrase contains a clothing keyword
         words = phrase.split()
-        if any(w in _CLOTHING_WORDS for w in words) and 2 <= len(words) <= 5:
+        if any(w in _CLOTHING_WORDS or w in _ROLE_WORDS for w in words) and 2 <= len(words) <= 6:
             aliases.append(phrase)
 
-    # Deduplicate preserving order
+    desc_lower = re.sub(r'[^\w\s]', ' ', desc.lower())
+    desc_words = desc_lower.split()
+    for i, w in enumerate(desc_words):
+        if w in _ROLE_WORDS or w in _CLOTHING_WORDS:
+            if i > 0:
+                combo = f"{desc_words[i-1]} {w}"
+                if len(combo) > 5:
+                    aliases.append(combo)
+            if i < len(desc_words) - 1:
+                combo = f"{w} {desc_words[i+1]}"
+                if len(combo) > 5:
+                    aliases.append(combo)
+            if i > 0 and i < len(desc_words) - 1:
+                combo = f"{desc_words[i-1]} {w} {desc_words[i+1]}"
+                if len(combo) > 8:
+                    aliases.append(combo)
+
     seen = set()
     unique = []
     for a in aliases:
@@ -910,32 +729,15 @@ def _extract_aliases(name, desc):
     return unique
 
 
+_dynamic_characters = {}
+
+
 def load_dynamic_characters(storyboard_text):
-    """Extract characters from storyboard and merge with hardcoded defaults.
-    Call this at upload time."""
+    """Extract characters from storyboard. Replaces hardcoded defaults completely."""
     global _dynamic_characters
     extracted = auto_extract_characters(storyboard_text)
     if extracted:
-        # Start with hardcoded, overlay with extracted
-        merged = dict(CHARACTERS)
-        for cid, char in extracted.items():
-            if cid in merged:
-                # Merge aliases: keep hardcoded + add extracted
-                existing_aliases = set(a.lower() for a in merged[cid]["alias"])
-                new_aliases = list(merged[cid]["alias"])
-                for a in char["alias"]:
-                    if a.lower() not in existing_aliases:
-                        new_aliases.append(a)
-                        existing_aliases.add(a.lower())
-                merged[cid]["alias"] = new_aliases
-                # Update desc and views from storyboard (more specific)
-                merged[cid]["desc"] = char["desc"]
-                merged[cid]["views"] = char["views"]
-                merged[cid]["name"] = char["name"]
-            else:
-                # New character not in hardcoded
-                merged[cid] = char
-        _dynamic_characters = merged
+        _dynamic_characters = extracted
     else:
         _dynamic_characters = dict(CHARACTERS)
     return _dynamic_characters
@@ -947,8 +749,125 @@ def get_active_characters():
 
 
 # ═══════════════════════════════════════════════════════════
+# DYNAMIC ENVIRONMENT SYSTEM -- Project-agnostic
+# ═══════════════════════════════════════════════════════════
+
+_dynamic_environments = {}
+_dynamic_master_shots = {}
+
+
+def auto_extract_environments(text):
+    """Parse ENVIRONMENTS array from storyboard JSX.
+    Supports: const ENVIRONMENTS = [{ id, name, keywords, prompt }, ...]"""
+    match = re.search(r'const\s+ENVIRONMENTS\s*=\s*\[', text)
+    if not match:
+        return {}
+    start = match.end()
+    depth = 1
+    pos = start
+    while pos < len(text) and depth > 0:
+        if text[pos] == '[':
+            depth += 1
+        elif text[pos] == ']':
+            depth -= 1
+        pos += 1
+    envs_text = text[start:pos-1]
+    extracted = {}
+    for obj in _extract_objects(envs_text):
+        id_m = re.search(r'id:\s*"([^"]+)"', obj)
+        name_m = re.search(r'name:\s*"([^"]+)"', obj)
+        if not id_m or not name_m:
+            continue
+        eid = id_m.group(1)
+        name = name_m.group(1)
+        kw_m = re.search(r'keywords:\s*\[([^\]]+)\]', obj)
+        keywords = re.findall(r'"([^"]+)"', kw_m.group(1)) if kw_m else [name.lower()]
+        prompt_m = re.search(r'prompt:\s*"((?:[^"\\]|\\.)*)"', obj)
+        prompt = prompt_m.group(1) if prompt_m else f"ENVIRONMENT REFERENCE. {name}. Wide 16:9. No people."
+        extracted[eid] = {"name": name, "keywords": keywords, "prompt_detail": prompt}
+    return extracted
+
+
+def auto_detect_environments_from_panels(panels):
+    """Fallback: cluster locations from panel prompts when no ENVIRONMENTS block in JSX."""
+    if not panels:
+        return {}
+    kw_map = {
+        "tunnel": (["tunnel", "underground", "shaft", "digging"], "Underground Tunnel"),
+        "vault": (["vault", "safe deposit", "vault door", "vault floor"], "Bank Vault"),
+        "bank_exterior": (["bank entrance", "bank building", "banco central"], "Bank Exterior"),
+        "house": (["house", "bedroom", "back door", "hallway", "residential", "green house"], "Safe House"),
+        "street": (["street", "sidewalk", "neighborhood", "suburban"], "Street / Neighborhood"),
+        "courtroom": (["courtroom", "court", "judge", "trial", "gavel"], "Courtroom"),
+        "prison": (["prison", "cell", "bars", "inmate"], "Prison"),
+        "highway": (["highway", "road", "motorway", "intersection"], "Highway / Road"),
+        "interrogation": (["interrogation", "police station", "surveillance"], "Police / Interrogation"),
+        "dealership": (["dealership", "showroom"], "Car Dealership"),
+        "rural": (["rural", "remote road", "countryside", "isolated"], "Rural / Remote"),
+        "aerial": (["aerial", "skyline", "cityscape"], "Aerial / City View"),
+    }
+    detected = {}
+    for eid, (keywords, name) in kw_map.items():
+        for p in panels:
+            text = (p.get('g', '') + ' ' + p.get('vo', '')).lower()
+            if any(kw in text for kw in keywords):
+                detected[eid] = {
+                    "name": name,
+                    "keywords": keywords,
+                    "prompt_detail": f"ENVIRONMENT REFERENCE. {name}. Dramatic cinematic lighting. Wide 16:9 widescreen. No people.",
+                }
+                break
+    return detected
+
+
+def load_dynamic_environments(storyboard_text, panels=None):
+    """Extract envs from JSX. Falls back to auto-detection from panels."""
+    global _dynamic_environments, _dynamic_master_shots
+
+    # Priority 1: Extract from JSX ENVIRONMENTS block
+    extracted = auto_extract_environments(storyboard_text)
+    if extracted:
+        _dynamic_environments = extracted
+        _dynamic_master_shots = {
+            eid: f"MASTER SHOT -- HERO RENDER. {e.get('prompt_detail', e['name'])} "
+                 f"Camera: wide establishing shot, cinematic composition. 16:9 widescreen. No people."
+            for eid, e in extracted.items()
+        }
+        return _dynamic_environments
+
+    # Priority 2: Auto-detect from panel prompts
+    if panels:
+        detected = auto_detect_environments_from_panels(panels)
+        if detected:
+            _dynamic_environments = detected
+            _dynamic_master_shots = {
+                eid: f"MASTER SHOT -- HERO RENDER. {e['name']}. "
+                     f"Dramatic cinematic lighting, atmospheric mood. "
+                     f"Camera: wide establishing shot. 16:9 widescreen. No people."
+                for eid, e in detected.items()
+            }
+            return _dynamic_environments
+
+    # Priority 3: Fall back to whatever is in ENVIRONMENTS (empty by default)
+    _dynamic_environments = dict(ENVIRONMENTS)
+    _dynamic_master_shots = dict(MASTER_SHOT_DETAILS)
+    return _dynamic_environments
+
+
+def get_active_environments():
+    """Return dynamic environments if loaded, else hardcoded."""
+    return _dynamic_environments if _dynamic_environments else ENVIRONMENTS
+
+
+def get_active_master_shots():
+    """Return dynamic master shots if loaded, else hardcoded."""
+    return _dynamic_master_shots if _dynamic_master_shots else MASTER_SHOT_DETAILS
+
+
+# ═══════════════════════════════════════════════════════════
 # CHARACTER + ENV DETECTION
 # ═══════════════════════════════════════════════════════════
+
 def detect_characters(prompt, vo=""):
     """Detect characters in prompt. Returns list of char IDs."""
     text = ((prompt or "") + " " + (vo or "")).lower()
@@ -964,10 +883,11 @@ def detect_characters(prompt, vo=""):
 
 
 def detect_environment(prompt, vo=""):
-    """Detect environment/location."""
+    """Detect environment/location using dynamic ENVIRONMENTS."""
     text = ((prompt or "") + " " + (vo or "")).lower()
-    for eid, env in ENVIRONMENTS.items():
-        for kw in env["keywords"]:
+    envs = get_active_environments()
+    for eid, env in envs.items():
+        for kw in env.get("keywords", []):
             if kw.lower() in text:
                 return eid
     return None
@@ -978,17 +898,16 @@ def count_words(text):
 
 
 # ═══════════════════════════════════════════════════════════
-# PROMPT BUILDER
+# PROMPT BUILDING
 # ═══════════════════════════════════════════════════════════
+
 def build_prompt(panel, char_id=None, env_id=None, all_chars=None):
     """Build generation prompt: ANCHOR + CHAR_REF + ENV_REF + STYLE + SCENE.
     Layer 8: all_chars = list of ALL character IDs in this panel."""
     scene_prompt = get_image_prompt(panel)
     asset = get_asset_type(panel)
-
     style = get_primary_style() if asset == 'noir' else get_secondary_style()
 
-    # Character ref instruction — ALL characters in scene (Layer 8)
     char_str = ""
     chars = get_active_characters()
     char_ids = all_chars or ([char_id] if char_id else [])
@@ -997,7 +916,7 @@ def build_prompt(panel, char_id=None, env_id=None, all_chars=None):
         if len(char_ids) == 1:
             char_str = (
                 f"SUBJECT CONSISTENCY: The character in this scene is {chars[char_ids[0]]['name']}. "
-                f"You MUST match the provided character reference sheet EXACTLY — same clothing, "
+                f"You MUST match the provided character reference sheet EXACTLY -- same clothing, "
                 f"same build, same proportions, same colors. Do NOT deviate. "
             )
         else:
@@ -1005,15 +924,15 @@ def build_prompt(panel, char_id=None, env_id=None, all_chars=None):
             char_str = (
                 f"SUBJECT CONSISTENCY: This scene contains {len(char_ids)} characters: {', '.join(names)}. "
                 f"Reference sheets are provided for each. Match EVERY character EXACTLY to their "
-                f"reference — same clothing, build, proportions, colors. Each character must be "
+                f"reference -- same clothing, build, proportions, colors. Each character must be "
                 f"visually distinct and match their own reference sheet. "
             )
 
-    # Environment ref instruction
     env_str = ""
-    if env_id and env_id in ENVIRONMENTS:
+    envs = get_active_environments()
+    if env_id and env_id in envs:
         env_str = (
-            f"ENVIRONMENT CONSISTENCY: This scene takes place in {ENVIRONMENTS[env_id]['name']}. "
+            f"ENVIRONMENT CONSISTENCY: This scene takes place in {envs[env_id]['name']}. "
             f"Maintain visual consistency with the environment reference image. "
         )
 
@@ -1021,22 +940,27 @@ def build_prompt(panel, char_id=None, env_id=None, all_chars=None):
 
 
 # ═══════════════════════════════════════════════════════════
-# CONFIG FILE — saves API key + settings
+# CONFIG FILE -- saves API key + settings
 # ═══════════════════════════════════════════════════════════
+
 CONFIG_FILE = Path("storyboard_config.json")
+
 
 def load_config():
     if CONFIG_FILE.exists():
-        try: return json.loads(CONFIG_FILE.read_text())
-        except: pass
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except:
+            pass
     return {}
+
 
 def save_config(data):
     existing = load_config()
     existing.update(data)
     CONFIG_FILE.write_text(json.dumps(existing, indent=2))
 
-# Image output settings — updated by UI dropdowns
+
 image_settings = {
     "resolution": "2K (recommended)",
     "aspect_ratio": "16:9",
@@ -1056,9 +980,11 @@ RESOLUTION_MAP = {
 
 AR_OPTIONS = ["16:9", "9:16", "4:3", "3:4", "1:1", "21:9"]
 
+
 # ═══════════════════════════════════════════════════════════
 # API GENERATION
 # ═══════════════════════════════════════════════════════════
+
 def get_config():
     ar = image_settings.get("aspect_ratio", "16:9")
     res_label = image_settings.get("resolution", "2K (recommended)")
@@ -1073,7 +999,6 @@ def get_config():
             )
         )
     except:
-        # Fallback without image_size for older SDK versions
         return types.GenerateContentConfig(
             response_modalities=['IMAGE', 'TEXT'],
             image_config=types.ImageConfig(aspect_ratio=ar)
@@ -1092,12 +1017,19 @@ def get_active_model():
     return image_settings.get("model", "gemini-3.1-flash-image-preview")
 
 
+def _resize_for_api(img, max_size=768):
+    """Resize image for API payload. Keeps aspect ratio, caps at max_size px on longest side."""
+    if max(img.size) > max_size:
+        img.thumbnail((max_size, max_size), Image.LANCZOS)
+    return img
+
+
 def gen_single(client, prompt, ref_paths=None, max_retries=3):
     contents = []
     if ref_paths:
         for rp in ref_paths:
             if Path(rp).exists():
-                contents.append(Image.open(rp))
+                contents.append(_resize_for_api(Image.open(rp)))
     contents.append(prompt)
     for attempt in range(max_retries):
         try:
@@ -1109,15 +1041,16 @@ def gen_single(client, prompt, ref_paths=None, max_retries=3):
         except Exception as e:
             if "429" in str(e) and attempt < max_retries - 1:
                 adaptive_delay.rate_limited()
-                wait = 30 * (attempt + 1)  # 30s, 60s, 90s
+                wait = 30 * (attempt + 1)
                 time.sleep(wait)
                 continue
             raise
 
 
 # ═══════════════════════════════════════════════════════════
-# ADAPTIVE DELAY — fast when API allows, slow when it doesn't
+# ADAPTIVE DELAY
 # ═══════════════════════════════════════════════════════════
+
 class AdaptiveDelay:
     """Start at 1s. If 429 hit, bump to 4s. Ease back down after consecutive successes."""
     def __init__(self):
@@ -1139,6 +1072,7 @@ class AdaptiveDelay:
         self.delay = min(self.max_delay, self.delay * 2)
         self.successes = 0
 
+
 adaptive_delay = AdaptiveDelay()
 
 
@@ -1147,7 +1081,6 @@ def gen_chat_section(client, section_name, panels_data, callback=None):
     results = {}
     try:
         chat = client.chats.create(model=get_active_model())
-        # Prime with world rules
         try:
             chat.send_message(
                 f"You are generating a cinematic documentary storyboard. "
@@ -1161,191 +1094,153 @@ def gen_chat_section(client, section_name, panels_data, callback=None):
             if pd.get("stop"):
                 break
             pid = pd["id"]
-            out = Path(pd["output"])
+            out_path = Path(pd["output"])
 
-            if out.exists():
-                results[pid] = "skip"
-                if callback: callback("skip", pid)
+            if out_path.exists():
+                if callback:
+                    callback("skip", pid)
+                results[pid] = True
                 continue
 
-            if callback: callback("generating", pid, pd.get("info", ""))
-
-            contents = []
-            for rp in pd.get("refs", []):
-                if Path(rp).exists():
-                    contents.append(Image.open(rp))
-            contents.append(pd["prompt"])
+            if callback:
+                callback("generating", pid, pd.get("info", ""))
 
             try:
-                resp = chat.send_message(contents)
+                contents = []
+                for rp in pd.get("refs", []):
+                    if Path(rp).exists():
+                        contents.append(_resize_for_api(Image.open(rp)))
+                    if len(contents) >= 3:
+                        break
+                contents.append(pd["prompt"])
+
+                resp = chat.send_message(contents, config=get_config())
+                adaptive_delay.success()
                 img = extract_image(resp)
                 if img:
-                    out.write_bytes(img)
-                    results[pid] = "ok"
-                    if callback: callback("ok", pid)
+                    out_path.write_bytes(img)
+                    results[pid] = True
+                    if callback:
+                        callback("ok", pid)
                 else:
-                    results[pid] = "warn"
-                    if callback: callback("warn", pid, "No image returned")
+                    results[pid] = False
+                    if callback:
+                        callback("warn", pid)
+
             except Exception as e:
-                # Auto-retry on 429 before fallback
                 if "429" in str(e):
-                    if callback: callback("log", f"Rate limited on {pid}, waiting 45s...", "warn")
-                    time.sleep(45)
+                    adaptive_delay.rate_limited()
+                    time.sleep(30)
                     try:
-                        resp = chat.send_message(contents)
-                        img = extract_image(resp)
-                        if img:
-                            out.write_bytes(img)
-                            results[pid] = "ok"
-                            if callback: callback("ok", pid)
-                            adaptive_delay.wait()
+                        contents2 = [pd["prompt"]]
+                        resp2 = chat.send_message(contents2, config=get_config())
+                        img2 = extract_image(resp2)
+                        if img2:
+                            out_path.write_bytes(img2)
+                            results[pid] = True
+                            if callback:
+                                callback("ok", pid)
                             continue
                     except:
                         pass
-                # Fallback to single shot (has its own retry)
-                try:
-                    img = gen_single(client, pd["prompt"], pd.get("refs"))
-                    if img:
-                        out.write_bytes(img)
-                        results[pid] = "ok"
-                        if callback: callback("ok", pid)
-                    else:
-                        results[pid] = "warn"
-                        if callback: callback("warn", pid, "No image (fallback)")
-                except Exception as e2:
-                    results[pid] = "fail"
-                    if callback: callback("fail", pid, str(e2)[:80])
+                results[pid] = False
+                if callback:
+                    callback("fail", pid, str(e)[:80])
 
             adaptive_delay.wait()
 
     except Exception as e:
-        # Chat creation failed — fallback all panels to single shot
-        if callback: callback("log", f"Chat failed for {section_name}, using single-shot", "warn")
-        for pd in panels_data:
-            if pd.get("stop"): break
-            pid = pd["id"]
-            out = Path(pd["output"])
-            if out.exists(): continue
-            if callback: callback("generating", pid, pd.get("info", ""))
-            try:
-                img = gen_single(client, pd["prompt"], pd.get("refs"))
-                if img:
-                    out.write_bytes(img)
-                    results[pid] = "ok"
-                    if callback: callback("ok", pid)
-                else:
-                    results[pid] = "warn"
-            except Exception as e2:
-                results[pid] = "fail"
-                if callback: callback("fail", pid, str(e2)[:80])
-            adaptive_delay.wait()
+        if callback:
+            callback("fail", "section", str(e)[:80])
 
     return results
 
 
 # ═══════════════════════════════════════════════════════════
-# L5: POST-PROCESSING
+# POST-PROCESSING -- Color grade
 # ═══════════════════════════════════════════════════════════
+
 def post_process(img_path, out_path=None):
-    g = get_grade_params()
+    """Apply cinematic color grade: teal-orange, contrast, vignette, grain."""
+    if out_path is None:
+        out_path = img_path
     img = Image.open(img_path).convert("RGB")
-    w, h = img.size
     arr = np.array(img, dtype=np.float32)
+    grade = get_grade_params()
 
-    # Desaturate
-    if g["desat"] > 0:
-        gray = np.mean(arr, axis=2, keepdims=True)
-        arr = arr * (1 - g["desat"]) + gray * g["desat"]
+    # Desaturation
+    desat = grade.get("desat", 0.15)
+    gray = np.mean(arr, axis=2, keepdims=True)
+    arr = arr * (1 - desat) + gray * desat
 
-    # Teal shadows, warm highlights
-    lum = np.mean(arr, axis=2, keepdims=True) / 255.0
-    shadow = np.clip(1.0 - lum * 2, 0, 1)
-    arr[:,:,0] += shadow[:,:,0] * g["teal_r"]
-    arr[:,:,1] += shadow[:,:,0] * g["teal_g"]
-    arr[:,:,2] += shadow[:,:,0] * g["teal_b"]
-    high = np.clip(lum * 2 - 1, 0, 1)
-    arr[:,:,0] += high[:,:,0] * g["warm_r"]
-    arr[:,:,1] += high[:,:,0] * g["warm_g"]
-    arr[:,:,2] += high[:,:,0] * g["warm_b"]
+    # Teal-orange split toning
+    luminance = np.mean(arr, axis=2, keepdims=True) / 255.0
+    shadows = 1.0 - luminance
+    highlights = luminance
+    arr[:, :, 0] += grade.get("teal_r", -12) * shadows[:, :, 0] + grade.get("warm_r", 12) * highlights[:, :, 0]
+    arr[:, :, 1] += grade.get("teal_g", 6) * shadows[:, :, 0] + grade.get("warm_g", 4) * highlights[:, :, 0]
+    arr[:, :, 2] += grade.get("teal_b", 15) * shadows[:, :, 0] + grade.get("warm_b", -8) * highlights[:, :, 0]
 
     # Contrast
-    arr = (arr - 128) * g["contrast"] + 128
-    arr = np.clip(arr, 0, 255).astype(np.uint8)
-    img = Image.fromarray(arr)
+    contrast = grade.get("contrast", 1.08)
+    arr = (arr - 128) * contrast + 128
 
     # Vignette
-    if g["vignette"] > 0:
-        vg = Image.new("L", (w, h), 0)
-        draw = ImageDraw.Draw(vg)
-        cx, cy = w // 2, h // 2
-        mr = int((w**2 + h**2)**0.5 / 2)
-        for i in range(mr, 0, -1):
-            draw.ellipse([cx-i, cy-i, cx+i, cy+i], fill=int(255 * (i/mr)**0.5))
-        vg_arr = np.array(vg, dtype=np.float32) / 255.0
-        strength = (1 - g["vignette"]) + vg_arr * g["vignette"]
-        img_arr = np.array(img, dtype=np.float32)
-        for c in range(3):
-            img_arr[:,:,c] *= strength
-        img = Image.fromarray(np.clip(img_arr, 0, 255).astype(np.uint8))
+    vig = grade.get("vignette", 0.25)
+    if vig > 0:
+        h, w = arr.shape[:2]
+        Y, X = np.ogrid[:h, :w]
+        cx, cy = w / 2, h / 2
+        dist = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
+        max_dist = np.sqrt(cx ** 2 + cy ** 2)
+        vignette_mask = 1 - vig * (dist / max_dist) ** 2
+        arr *= vignette_mask[:, :, np.newaxis]
 
     # Film grain
-    if g["grain"] > 0:
-        grain = np.random.normal(0, g["grain"], (h, w)).astype(np.float32)
-        img_arr = np.array(img, dtype=np.float32)
-        for c in range(3):
-            img_arr[:,:,c] += grain
-        img = Image.fromarray(np.clip(img_arr, 0, 255).astype(np.uint8))
+    grain_amount = grade.get("grain", 6)
+    if grain_amount > 0:
+        noise = np.random.normal(0, grain_amount, arr.shape).astype(np.float32)
+        arr += noise
 
-    img.save(out_path or img_path, quality=95)
+    arr = np.clip(arr, 0, 255).astype(np.uint8)
+    Image.fromarray(arr).save(out_path, quality=95)
 
 
 # ═══════════════════════════════════════════════════════════
-# L6: MASTER SHOTS — Hero render per location
+# MASTER SHOT PROMPTS -- dynamic
 # ═══════════════════════════════════════════════════════════
-MASTER_SHOT_DETAILS = {
-    "vault_interior": "MASTER SHOT — HERO RENDER. Interior of massive underground bank vault in Antwerp Diamond Centre. Rows of numbered metal safe deposit boxes lining concrete walls floor to ceiling. Single dramatic overhead spotlight creating cone of light in center. Polished concrete floor reflecting light. Heavy industrial architecture, reinforced concrete pillars. Cold, sterile, imposing. Camera: wide symmetrical shot down center aisle. 16:9. No people.",
-    "vault_door": "MASTER SHOT — HERO RENDER. Massive circular steel bank vault door, 2 meters diameter, set in thick reinforced concrete wall. Complex locking mechanism with multiple bolt rods visible. Single overhead light creating dramatic rim light on metal edges. Underground corridor stretching behind. Camera: straight-on medium shot. 16:9. No people.",
-    "corridor": "MASTER SHOT — HERO RENDER. Dimly lit basement corridor of the Antwerp Diamond Centre. Concrete walls, industrial pipes running along ceiling. Fluorescent tube lights casting harsh greenish pools of light with deep shadows between. Metal handrail along one wall. Emergency exit sign glowing at far end. Institutional, claustrophobic. Camera: long perspective shot down corridor. 16:9. No people.",
-    "office": "MASTER SHOT — HERO RENDER. Small rented office inside the Antwerp Diamond Centre building. Wooden desk with brass desk lamp casting warm pool of light. Single window showing overcast Belgian sky. Simple chair, empty shelves, dark wood door. Modest but clean 2000s European office. Camera: medium wide from doorway looking in. 16:9. No people.",
-    "exterior": "MASTER SHOT — HERO RENDER. The Antwerp Diamond Centre building exterior. Imposing early 1900s Belgian stone architecture, ornate facade, heavy glass entrance doors. Hoveniersstraat street level. Overcast sky, wet cobblestones. Grand, institutional, fortress-like. Camera: dramatic low angle looking up at facade. 16:9. No people.",
-    "diamond_district": "MASTER SHOT — HERO RENDER. Antwerp Diamond District at night. Narrow cobblestone street with jewelry shop windows casting warm golden light. Wet pavement reflecting lamplight. Shuttered storefronts, security cameras on poles. Deserted, atmospheric. Camera: wide establishing shot down the street. 16:9. No people.",
-    "garage": "MASTER SHOT — HERO RENDER. Underground parking garage beneath the Diamond Centre. Concrete ramp descending into darkness. Yellow sodium vapor lights casting amber glow. Low concrete ceiling, painted markings on floor. Cold, industrial, nighttime. Camera: looking down the ramp from street level. 16:9. No people.",
-    "apartment": "MASTER SHOT — HERO RENDER. Notarbartolo's rented Antwerp apartment. Sparse European flat. Simple wooden table center frame under single warm pendant light. Dark walls, drawn curtains. Minimal furniture — functional, temporary, anonymous. Night time. Camera: wide shot from corner of room. 16:9. No people.",
-    "warehouse": "MASTER SHOT — HERO RENDER. Large abandoned warehouse outside Antwerp. Crude but functional replica vault door and antechamber constructed from steel plates and concrete blocks. Construction lights on stands illuminating the setup. Dark cavernous warehouse space beyond. Camera: wide reveal shot. 16:9. No people.",
-    "workshop": "MASTER SHOT — HERO RENDER. Dimly lit Italian mechanic's workshop. Heavy workbench with scattered precision tools, lockpicks, metal files. Single overhead bulb creating harsh shadows. Metalworking vise bolted to bench edge. Shelves with parts and supplies. Gritty, industrial. Camera: medium wide from doorway. 16:9. No people.",
-    "vancamp_property": "MASTER SHOT — HERO RENDER. Wooded roadside area near E19 motorway, 40km south of Antwerp. Bare winter trees, dead leaves on muddy ground. Highway visible through trees in background. Cold February morning light. Quiet, isolated, forensic atmosphere. Camera: wide establishing shot from path. 16:9. No people.",
-    "highway": "MASTER SHOT — HERO RENDER. E19 motorway between Antwerp and Brussels at night. Two-lane highway stretching into darkness. Dense forest on both sides. Wet asphalt reflecting distant car lights. Road markings visible. Overcast winter night. Camera: center of road looking ahead. 16:9. No people.",
-    "crime_scene": "MASTER SHOT — HERO RENDER. Muddy woodland clearing cordoned with police tape. Evidence markers placed on ground next to scattered garbage bags. Officers in dark uniforms visible at perimeter. Overcast sky. Forensic, methodical atmosphere. Camera: wide shot from tape line. 16:9. No people in foreground.",
-    "prison": "MASTER SHOT — HERO RENDER. Stark Belgian prison interview room. Metal table with two chairs. Single harsh overhead light creating cone on table surface. Concrete walls, small barred window high up. Institutional, cold, confined. Camera: corner wide shot. 16:9. No people.",
-    "factory_district": "MASTER SHOT — HERO RENDER. Industrial district of Turin, Italy at dusk. Massive Fiat factory buildings with smokestacks silhouetted against orange sky. Chain-link fencing, puddles reflecting factory lights. Gritty working-class atmosphere. Camera: wide panoramic. 16:9. No people.",
-    "italian_rural": "MASTER SHOT — HERO RENDER. Modest rural property outside Turin, Italy at dusk. Small warehouse building with delivery truck parked outside. Rolling Piedmont hills in background. Warm amber light from single window. Peaceful but melancholy atmosphere. Camera: wide establishing shot. 16:9. No people.",
-    "courtroom": "MASTER SHOT — HERO RENDER. Belgian courtroom interior. Elevated wooden judge's bench center frame, witness stand to the left. Dark wood paneling on walls. Institutional fluorescent and natural window light. Gallery seating with wooden pews. Formal, imposing, justice. Camera: wide symmetrical from gallery perspective. 16:9. No people.",
-    "police_station": "MASTER SHOT — HERO RENDER. Belgian police station interrogation room. Metal table with two chairs facing each other. One-way mirror on wall. Single harsh overhead light creating cone of light on table. Concrete walls, institutional cold. Camera: corner wide shot. 16:9. No people.",
-    "aerial_city": "MASTER SHOT — HERO RENDER. Dramatic aerial establishing shot of Antwerp at dusk. Diamond district buildings below, Cathedral of Our Lady spire visible. Scheldt river in background. Overcast sky with golden light breaking through. Cinematic drone perspective. Camera: high angle sweeping view. 16:9. No people.",
-}
 
 def get_master_shot_prompt(eid):
-    """Build master shot prompt using active preset."""
-    detail = MASTER_SHOT_DETAILS.get(eid, "")
+    """Build master shot prompt using active preset + dynamic data."""
+    details = get_active_master_shots()
+    detail = details.get(eid, "")
     if not detail:
-        return get_env_prompt(eid)
+        envs = get_active_environments()
+        if eid in envs:
+            env = envs[eid]
+            detail = (
+                f"MASTER SHOT -- HERO RENDER. {env.get('prompt_detail', env.get('prompt', ''))} "
+                f"Camera: wide establishing shot, cinematic composition. 16:9 widescreen. No people."
+            )
+        else:
+            return get_env_prompt(eid)
     return get_world_anchor() + get_primary_style() + detail
 
 
 # ═══════════════════════════════════════════════════════════
-# L7: VISUAL MEMORY BANK — Track best renders across sections
+# L7: VISUAL MEMORY BANK
 # ═══════════════════════════════════════════════════════════
+
 class VisualMemoryBank:
-    """
-    Tracks the latest successful render for each character and environment.
-    Layer 10: Also tracks section bridge frames for cross-section continuity.
-    """
+    """Tracks the latest successful render for each character and environment.
+    Layer 10: Also tracks section bridge frames for cross-section continuity."""
+
     def __init__(self, output_dir):
         self.output_dir = Path(output_dir)
         self.bank_file = self.output_dir / "memory_bank.json"
-        self.char_latest = {}   # cid → path to latest successful scene render
-        self.env_latest = {}    # eid → path to latest successful scene render
-        self.section_last = {}  # section_name → path to last frame of that section (Layer 10)
+        self.char_latest = {}
+        self.env_latest = {}
+        self.section_last = {}
         self.load()
 
     def load(self):
@@ -1355,7 +1250,6 @@ class VisualMemoryBank:
                 self.char_latest = data.get("char_latest", {})
                 self.env_latest = data.get("env_latest", {})
                 self.section_last = data.get("section_last", {})
-                # Verify paths still exist
                 self.char_latest = {k: v for k, v in self.char_latest.items() if Path(v).exists()}
                 self.env_latest = {k: v for k, v in self.env_latest.items() if Path(v).exists()}
                 self.section_last = {k: v for k, v in self.section_last.items() if Path(v).exists()}
@@ -1370,25 +1264,21 @@ class VisualMemoryBank:
         }, indent=2))
 
     def update_char(self, cid, scene_path):
-        """After successfully rendering a scene with @cid, save as latest ref."""
         if Path(scene_path).exists():
             self.char_latest[cid] = str(scene_path)
             self.save()
 
     def update_env(self, eid, scene_path):
-        """After successfully rendering a scene in this env, save as latest ref."""
         if Path(scene_path).exists():
             self.env_latest[eid] = str(scene_path)
             self.save()
 
     def update_section(self, section_name, scene_path):
-        """Layer 10: Save last frame of a section for cross-section continuity."""
         if Path(scene_path).exists():
             self.section_last[section_name] = str(scene_path)
             self.save()
 
     def get_previous_section_bridge(self, current_section, section_order):
-        """Layer 10: Get the last frame from the previous section."""
         if not section_order:
             return None
         try:
@@ -1425,66 +1315,71 @@ class VisualMemoryBank:
 # ═══════════════════════════════════════════════════════════
 # LAYER 9: STYLE ANCHOR
 # ═══════════════════════════════════════════════════════════
+
 def get_style_anchor_prompt():
-    """Generate a style key image — the single most representative frame.
-    This image gets sent with every panel as a visual style lock."""
+    """Generate a style key image. Uses first environment if available."""
+    envs = get_active_environments()
+    if envs:
+        first_env = next(iter(envs.values()))
+        env_desc = first_env.get("prompt_detail", first_env.get("prompt", ""))[:200]
+    else:
+        env_desc = (
+            "A dimly lit interior space, cold blue-gray tones, dramatic single-source "
+            "overhead lighting, atmospheric dust particles in light beams."
+        )
     return (
         get_world_anchor() +
         get_primary_style() +
-        "STYLE KEY IMAGE: Generate a single establishing shot that defines the visual "
-        "style of this entire project. A dimly lit underground corridor, cold blue-gray "
-        "tones, dramatic single-source overhead lighting, polished concrete floor reflecting "
-        "light, industrial steel doors at the end, atmospheric dust particles in light beams. "
-        "This image sets the tone for every frame that follows. Cinematic, moody, premium. "
-        "16:9 widescreen. No characters — environment only. "
+        f"STYLE KEY IMAGE: Generate a single establishing shot that defines the visual "
+        f"style of this entire project. {env_desc} "
+        f"This image sets the tone for every frame that follows. Cinematic, moody, premium. "
+        f"16:9 widescreen. No characters -- environment only. "
     )
 
 
 # ═══════════════════════════════════════════════════════════
 # LAYER 11: CONSISTENCY SCORING
 # ═══════════════════════════════════════════════════════════
+
 def score_consistency(client, generated_path, ref_paths, panel_desc=""):
     """Score how well a generated image matches its references.
     Uses Gemini vision to compare. Returns score 0-100 and feedback."""
     try:
         contents = []
-        contents.append("CONSISTENCY EVALUATION: Compare the FIRST image (generated scene) against "
-                       "the REFERENCE images that follow. Score how well the generated scene "
-                       "matches the references on these criteria:\n"
-                       "1. Character appearance (clothing, build, proportions)\n"
-                       "2. Environment consistency (lighting, architecture, mood)\n"
-                       "3. Style consistency (color palette, contrast, atmosphere)\n\n"
-                       "Respond with ONLY a JSON object: {\"score\": <0-100>, \"issues\": \"<brief description>\"}\n"
-                       "Score 80+ = good match, 60-79 = acceptable, below 60 = needs redo.")
+        contents.append(
+            "CONSISTENCY EVALUATION: Compare the FIRST image (generated scene) against "
+            "the REFERENCE images that follow. Score how well the generated scene "
+            "matches the references on these criteria:\n"
+            "1. Character appearance (clothing, build, proportions)\n"
+            "2. Environment consistency (lighting, architecture, mood)\n"
+            "3. Style consistency (color palette, contrast, atmosphere)\n\n"
+            'Respond with ONLY a JSON object: {"score": <0-100>, "issues": "<brief description>"}\n'
+            "Score 80+ = good match, 60-79 = acceptable, below 60 = needs redo."
+        )
 
-        # Generated image first
         if Path(generated_path).exists():
-            contents.append(Image.open(generated_path))
+            contents.append(_resize_for_api(Image.open(generated_path)))
         else:
             return 100, "No image to score"
 
-        # Reference images
         for rp in ref_paths[:3]:
             if Path(rp).exists():
-                contents.append(Image.open(rp))
+                contents.append(_resize_for_api(Image.open(rp)))
 
-        if len(contents) < 3:  # Need at least prompt + generated + 1 ref
+        if len(contents) < 3:
             return 100, "Not enough refs to score"
 
         resp = client.models.generate_content(
-            model=get_active_model().replace("-image-preview", ""),  # Use text model
+            model=get_active_model().replace("-image-preview", ""),
             contents=contents
         )
 
-        # Parse response
         text = ""
         for part in resp.candidates[0].content.parts:
             if hasattr(part, 'text') and part.text:
                 text = part.text.strip()
                 break
 
-        # Extract score from JSON
-        import re
         score_match = re.search(r'"score"\s*:\s*(\d+)', text)
         issues_match = re.search(r'"issues"\s*:\s*"([^"]*)"', text)
         score = int(score_match.group(1)) if score_match else 75
@@ -1492,22 +1387,21 @@ def score_consistency(client, generated_path, ref_paths, panel_desc=""):
         return min(100, max(0, score)), issues
 
     except Exception as e:
-        # If scoring fails, don't block generation
         return 75, f"Score error: {str(e)[:60]}"
 
 
 # ═══════════════════════════════════════════════════════════
 # LAYER 12: ADAPTIVE PROMPTING
 # ═══════════════════════════════════════════════════════════
+
 def build_adaptive_prompt(original_prompt, score, issues, attempt=1):
     """Add correction instructions when consistency score is low."""
     if score >= 70:
-        return original_prompt  # Good enough
+        return original_prompt
 
     severity = "CRITICAL" if score < 50 else "IMPORTANT"
-
     correction = (
-        f"\n\n[{severity} CORRECTION — Attempt {attempt+1}]: "
+        f"\n\n[{severity} CORRECTION -- Attempt {attempt+1}]: "
         f"The previous generation scored {score}/100 on consistency. "
         f"Issues: {issues}. "
     )
@@ -1526,12 +1420,3 @@ def build_adaptive_prompt(original_prompt, score, issues, attempt=1):
         )
 
     return original_prompt + correction
-
-
-# ═══════════════════════════════════════════════════════════
-# GUI
-# ═══════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════
-# PREMIUM GUI — CustomTkinter
-# ═══════════════════════════════════════════════════════════
